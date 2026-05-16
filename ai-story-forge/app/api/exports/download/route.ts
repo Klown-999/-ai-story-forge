@@ -1,70 +1,18 @@
 
 import { NextResponse } from "next/server";
 import { requireAppUser } from "@/lib/authz";
-import {
-  getRunById,
-  getStoriesForRun,
-  userCanAccessRun,
-} from "@/lib/security-db";
-import {
-  buildCsvExport,
-  buildDocxExport,
-  buildJsonExport,
-  buildMarkdownExport,
-  buildPdfExport,
-  buildTextExport,
-  ExportFormat,
-  ExportScope,
-  filterStoriesByScope,
-  slugify,
-} from "@/lib/export-utils";
+import { createExportFile } from "@/lib/export-utils";
+import { getRunById, getStoriesForRun, userCanAccessRun } from "@/lib/security-db";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-type DownloadBody = {
+type ExportBody = {
   runId?: string;
-  format?: ExportFormat;
+  format?: "json" | "md" | "csv" | "txt" | "docx" | "pdf";
   title?: string;
-  scope?: ExportScope;
+  scope?: "all" | "epics" | "stories";
 };
-
-function contentTypeForFormat(format: ExportFormat) {
-  switch (format) {
-    case "json":
-      return "application/json";
-    case "md":
-      return "text/markdown; charset=utf-8";
-    case "csv":
-      return "text/csv; charset=utf-8";
-    case "txt":
-      return "text/plain; charset=utf-8";
-    case "docx":
-      return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-    case "pdf":
-      return "application/pdf";
-    default:
-      return "application/octet-stream";
-  }
-}
-
-function extensionForFormat(format: ExportFormat) {
-  switch (format) {
-    case "json":
-      return "json";
-    case "md":
-      return "md";
-    case "csv":
-      return "csv";
-    case "txt":
-      return "txt";
-    case "docx":
-      return "docx";
-    case "pdf":
-      return "pdf";
-    default:
-      return "bin";
-  }
-}
 
 export async function POST(request: Request) {
   try {
@@ -77,7 +25,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const body = (await request.json()) as DownloadBody;
+    const body = (await request.json()) as ExportBody;
 
     if (!body.runId) {
       return NextResponse.json(
@@ -104,67 +52,30 @@ export async function POST(request: Request) {
       );
     }
 
-    const allStories = getStoriesForRun(body.runId);
-    const filteredStories = filterStoriesByScope(allStories, scope);
-    const exportTitle = body.title?.trim() || run.title || "AI Story Forge Export";
+    const stories = getStoriesForRun(body.runId);
 
-    let fileBuffer: Buffer;
-    let fileName = `${slugify(exportTitle)}.${extensionForFormat(format)}`;
+    const exportFile = await createExportFile({
+      format,
+      scope,
+      title: body.title?.trim() || run.title,
+      date: run.date,
+      stories,
+    });
 
-    try {
-      switch (format) {
-        case "json":
-          fileBuffer = Buffer.from(
-            buildJsonExport(exportTitle, filteredStories),
-            "utf8"
-          );
-          break;
-        case "md":
-          fileBuffer = Buffer.from(
-            buildMarkdownExport(exportTitle, filteredStories),
-            "utf8"
-          );
-          break;
-        case "csv":
-          fileBuffer = Buffer.from(buildCsvExport(filteredStories), "utf8");
-          break;
-        case "txt":
-          fileBuffer = Buffer.from(
-            buildTextExport(exportTitle, filteredStories),
-            "utf8"
-          );
-          break;
-        case "docx":
-          fileBuffer = await buildDocxExport(exportTitle, filteredStories);
-          break;
-        case "pdf":
-          fileBuffer = await buildPdfExport(exportTitle, filteredStories);
-          break;
-        default:
-          return NextResponse.json(
-            { message: "Unsupported format" },
-            { status: 400 }
-          );
-      }
-    } catch (innerError) {
-      console.error(
-        `Export generation failed for format=${format}, runId=${body.runId}:`,
-        innerError
-      );
-      throw innerError;
-    }
-
-    return new NextResponse(new Uint8Array(fileBuffer), {
+    return new NextResponse(exportFile.buffer, {
       status: 200,
       headers: {
-        "Content-Type": contentTypeForFormat(format),
-        "Content-Disposition": `attachment; filename="${fileName}"`,
+        "Content-Type": exportFile.contentType,
+        "Content-Disposition": `attachment; filename="${exportFile.filename}"`,
       },
     });
   } catch (error) {
     console.error("POST /api/exports/download failed:", error);
     return NextResponse.json(
-      { message: "Failed to generate export" },
+      {
+        message:
+          error instanceof Error ? error.message : "Failed to export run",
+      },
       { status: 500 }
     );
   }

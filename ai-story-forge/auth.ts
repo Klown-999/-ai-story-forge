@@ -21,12 +21,17 @@ function splitEmails(value: string | undefined) {
 
 function resolveRoleForEmail(email: string): AppRole {
   const normalized = email.toLowerCase();
-  const adminEmails = splitEmails(process.env.AUTH_ADMIN_EMAILS);
-  const viewerEmails = splitEmails(process.env.AUTH_VIEWER_EMAILS);
+
+  const adminEmails = splitEmails(process.env.ADMIN_EMAILS);
+  const editorEmails = splitEmails(process.env.EDITOR_EMAILS);
+  const viewerEmails = splitEmails(process.env.VIEWER_EMAILS);
 
   if (adminEmails.includes(normalized)) return "admin";
+  if (editorEmails.includes(normalized)) return "editor";
   if (viewerEmails.includes(normalized)) return "viewer";
-  return "editor";
+
+  // default fallback
+  return "viewer";
 }
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
@@ -106,3 +111,4 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     },
   },
 });
+``

@@ -27,29 +27,37 @@ function ensureAllowedFileName(fileName: string) {
   }
 }
 
-async function extractText(fileName: string, buffer: Buffer) {
-  const sourceType = getSourceType(fileName);
+async function extractText(fileName: string, mimeType: string, buffer: Buffer) {
+  const lowerName = fileName.toLowerCase();
 
-  if (sourceType === "txt" || sourceType === "md") {
+  if (
+    mimeType === "text/plain" ||
+    mimeType === "text/markdown" ||
+    lowerName.endsWith(".txt") ||
+    lowerName.endsWith(".md")
+  ) {
     return buffer.toString("utf8");
   }
 
-  if (sourceType === "docx") {
+  if (
+    mimeType ===
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+    lowerName.endsWith(".docx")
+  ) {
+    const mammoth = await import("mammoth");
     const result = await mammoth.extractRawText({ buffer });
     return result.value || "";
   }
 
-  if (sourceType === "pdf") {
+  if (mimeType === "application/pdf" || lowerName.endsWith(".pdf")) {
     const pdfModule = await import("pdf-parse");
-    const pdfParse =
-      (pdfModule as unknown as { default?: (data: Buffer) => Promise<{ text: string }> }).default ??
-      (pdfModule as unknown as (data: Buffer) => Promise<{ text: string }>);
+    const pdfParse = (pdfModule as any).default ?? (pdfModule as any);
 
     const result = await pdfParse(buffer);
     return result.text || "";
   }
 
-  throw new Error("Unsupported PRD file type. Use .txt, .md, .docx, or .pdf");
+  throw new Error("Unsupported file type");
 }
 
 export async function POST(request: Request) {
@@ -98,7 +106,7 @@ export async function POST(request: Request) {
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
-    const prdText = await extractText(file.name, buffer);
+    const prdText = await extractText(file.name, file.type, buffer);
 
     if (!prdText.trim()) {
       return NextResponse.json(

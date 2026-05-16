@@ -1,6 +1,10 @@
 
 import { randomUUID } from "crypto";
 import db from "@/lib/sqlite";
+import type {
+  AutonomousRefinementSummary,
+  RequirementQualityReport,
+} from "@/lib/ai/schemas";
 
 export type AppRole = "admin" | "editor" | "viewer";
 
@@ -31,6 +35,33 @@ db.exec(`
 `);
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS run_stories (
+    run_id TEXT NOT NULL,
+    story_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    estimate TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    depends_on_json TEXT NOT NULL,
+    labels_json TEXT NOT NULL,
+    acceptance_json TEXT NOT NULL,
+    story_format TEXT,
+    story_points INTEGER,
+    edge_cases_json TEXT,
+    PRIMARY KEY (run_id, story_id)
+  );
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS run_refinement_summaries (
+    run_id TEXT PRIMARY KEY,
+    summary_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+`);
+
+db.exec(`
   CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
     owner_user_id TEXT NOT NULL,
@@ -50,6 +81,24 @@ db.exec(`
 `);
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS run_generation_jobs (
+    job_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    prd_text TEXT NOT NULL,
+    user_approved_major_changes INTEGER,
+    source_type TEXT,
+    source_file_name TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at TEXT,
+    finished_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+`);
+
+db.exec(`
   CREATE TABLE IF NOT EXISTS stories (
     story_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
@@ -60,6 +109,16 @@ db.exec(`
     depends_on_json TEXT NOT NULL,
     labels_json TEXT NOT NULL,
     acceptance_json TEXT NOT NULL
+  );
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS run_quality_reports (
+    run_id TEXT PRIMARY KEY,
+    summary TEXT NOT NULL,
+    report_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 `);
 
@@ -85,6 +144,18 @@ db.exec(`
   );
 `);
 
+try {
+  db.exec(`ALTER TABLE run_stories ADD COLUMN story_format TEXT;`);
+} catch {}
+
+try {
+  db.exec(`ALTER TABLE run_stories ADD COLUMN story_points INTEGER;`);
+} catch {}
+
+try {
+  db.exec(`ALTER TABLE run_stories ADD COLUMN edge_cases_json TEXT;`);
+} catch {}
+
 export function getAppUserByEmail(email: string) {
   const stmt = db.prepare(`
     SELECT *
@@ -94,6 +165,142 @@ export function getAppUserByEmail(email: string) {
   `);
 
   return stmt.get(email) as AppUserRow | undefined;
+}
+
+export type RunGenerationJobStatus =
+  | "queued"
+  | "processing"
+  | "ready"
+  | "failed";
+
+export function createGenerationJob(params: {
+  jobId: string;
+  runId: string;
+  ownerUserId: string;
+  prdText: string;
+  userApprovedMajorChanges?: boolean | null;
+  sourceType?: string | null;
+  sourceFileName?: string | null;
+}) {
+  const stmt = db.prepare(`
+    INSERT INTO run_generation_jobs (
+      job_id,
+      run_id,
+      owner_user_id,
+      status,
+      prd_text,
+      user_approved_major_changes,
+      source_type,
+      source_file_name
+    ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)
+  `);
+
+  stmt.run(
+    params.jobId,
+    params.runId,
+    params.ownerUserId,
+    params.prdText,
+    params.userApprovedMajorChanges == null
+      ? null
+      : params.userApprovedMajorChanges
+      ? 1
+      : 0,
+    params.sourceType ?? null,
+    params.sourceFileName ?? null
+  );
+}
+
+export function getGenerationJobByRunId(runId: string) {
+  const stmt = db.prepare(`
+    SELECT *
+    FROM run_generation_jobs
+    WHERE run_id = ?
+    LIMIT 1
+  `);
+
+  return stmt.get(runId) as
+    | {
+        job_id: string;
+        run_id: string;
+        owner_user_id: string;
+        status: RunGenerationJobStatus;
+        prd_text: string;
+        user_approved_major_changes: number | null;
+        source_type: string | null;
+        source_file_name: string | null;
+        error_message: string | null;
+        created_at: string;
+        started_at: string | null;
+        finished_at: string | null;
+        updated_at: string;
+      }
+    | undefined;
+}
+
+export function listQueuedGenerationJobs(limit = 5) {
+  const stmt = db.prepare(`
+    SELECT *
+    FROM run_generation_jobs
+    WHERE status = 'queued'
+    ORDER BY created_at ASC
+    LIMIT ?
+  `);
+
+  return stmt.all(limit) as Array<{
+    job_id: string;
+    run_id: string;
+    owner_user_id: string;
+    status: RunGenerationJobStatus;
+    prd_text: string;
+    user_approved_major_changes: number | null;
+    source_type: string | null;
+    source_file_name: string | null;
+    error_message: string | null;
+    created_at: string;
+    started_at: string | null;
+    finished_at: string | null;
+    updated_at: string;
+  }>;
+}
+
+export function markGenerationJobProcessing(jobId: string) {
+  const stmt = db.prepare(`
+    UPDATE run_generation_jobs
+    SET status = 'processing',
+        started_at = datetime('now'),
+        updated_at = datetime('now')
+    WHERE job_id = ?
+      AND status = 'queued'
+  `);
+
+  const result = stmt.run(jobId);
+  return result.changes > 0;
+}
+
+export function markGenerationJobReady(jobId: string) {
+  const stmt = db.prepare(`
+    UPDATE run_generation_jobs
+    SET status = 'ready',
+        finished_at = datetime('now'),
+        updated_at = datetime('now'),
+        error_message = NULL
+    WHERE job_id = ?
+  `);
+
+  stmt.run(jobId);
+}
+
+export function markGenerationJobFailed(jobId: string, errorMessage: string) {
+  const stmt = db.prepare(`
+    UPDATE run_generation_jobs
+    SET status = 'failed',
+        finished_at = datetime('now'),
+        updated_at = datetime('now'),
+        error_message = ?
+    WHERE job_id = ?
+  `);
+
+  stmt.run(errorMessage, jobId);
 }
 
 export function getAppUserById(userId: string) {
@@ -188,6 +395,9 @@ export type StoryRow = {
   dependsOn: string[];
   labels: string[];
   acceptance: string[];
+  storyFormat?: string | null;
+  storyPoints?: number | null;
+  edgeCases?: string[];
 };
 
 export function createRun(params: {
@@ -231,47 +441,48 @@ export function createRun(params: {
   return runId;
 }
 
-export function replaceStoriesForRun(runId: string, stories: StoryRow[]) {
-  const deleteStmt = db.prepare(`DELETE FROM stories WHERE run_id = ?`);
+export function replaceStoriesForRun(runId: string, rows: StoryRow[]) {
+  const deleteStmt = db.prepare(`
+    DELETE FROM run_stories
+    WHERE run_id = ?
+  `);
+
   deleteStmt.run(runId);
 
   const insertStmt = db.prepare(`
-    INSERT INTO stories (
-      story_id,
+    INSERT INTO run_stories (
       run_id,
+      story_id,
       kind,
       title,
       estimate,
       owner,
       depends_on_json,
       labels_json,
-      acceptance_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      acceptance_json,
+      story_format,
+      story_points,
+      edge_cases_json
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  for (const story of stories) {
+  for (const row of rows) {
     insertStmt.run(
-      story.id,
       runId,
-      story.kind,
-      story.title,
-      story.estimate,
-      story.owner,
-      JSON.stringify(story.dependsOn),
-      JSON.stringify(story.labels),
-      JSON.stringify(story.acceptance)
+      row.id,
+      row.kind,
+      row.title,
+      row.estimate,
+      row.owner,
+      JSON.stringify(row.dependsOn || []),
+      JSON.stringify(row.labels || []),
+      JSON.stringify(row.acceptance || []),
+      row.storyFormat ?? null,
+      row.storyPoints ?? null,
+      JSON.stringify(row.edgeCases || [])
     );
   }
-
-  const updateRunStmt = db.prepare(`
-    UPDATE runs
-    SET story_count = ?,
-        updated_at = datetime('now'),
-        last_saved_at = datetime('now')
-    WHERE run_id = ?
-  `);
-
-  updateRunStmt.run(stories.length, runId);
 }
 
 export function addRunActivity(params: {
@@ -372,23 +583,37 @@ export function getRunById(runId: string) {
     | undefined;
 }
 
-export function getStoriesForRun(runId: string): StoryRow[] {
+export function getStoriesForRun(runId: string) {
   const stmt = db.prepare(`
-    SELECT *
-    FROM stories
+    SELECT
+      story_id,
+      kind,
+      title,
+      estimate,
+      owner,
+      depends_on_json,
+      labels_json,
+      acceptance_json,
+      story_format,
+      story_points,
+      edge_cases_json
+    FROM run_stories
     WHERE run_id = ?
-    ORDER BY rowid ASC
+    ORDER BY kind ASC, story_id ASC
   `);
 
   const rows = stmt.all(runId) as Array<{
     story_id: string;
     kind: "Epic" | "Story";
     title: string;
-    estimate: string;
+    estimate: "S" | "M" | "L" | "XL";
     owner: string;
     depends_on_json: string;
     labels_json: string;
     acceptance_json: string;
+    story_format: string | null;
+    story_points: number | null;
+    edge_cases_json: string | null;
   }>;
 
   return rows.map((row) => ({
@@ -397,9 +622,14 @@ export function getStoriesForRun(runId: string): StoryRow[] {
     title: row.title,
     estimate: row.estimate,
     owner: row.owner,
-    dependsOn: JSON.parse(row.depends_on_json),
-    labels: JSON.parse(row.labels_json),
-    acceptance: JSON.parse(row.acceptance_json),
+    dependsOn: JSON.parse(row.depends_on_json || "[]"),
+    labels: JSON.parse(row.labels_json || "[]"),
+    acceptance: JSON.parse(row.acceptance_json || "[]"),
+    storyFormat: row.story_format ?? undefined,
+    storyPoints: row.story_points ?? undefined,
+    edgeCases: row.edge_cases_json
+      ? JSON.parse(row.edge_cases_json)
+      : [],
   }));
 }
 
@@ -536,4 +766,99 @@ export function listSharedRunIdsForUser(viewerUserId: string) {
 
   const rows = stmt.all(viewerUserId) as Array<{ run_id: string }>;
   return rows.map((row) => row.run_id);
+}
+
+export function upsertRunQualityReport(
+  runId: string,
+  report: RequirementQualityReport
+) {
+  const stmt = db.prepare(`
+    INSERT INTO run_quality_reports (
+      run_id,
+      summary,
+      report_json,
+      created_at,
+      updated_at
+    )
+    VALUES (?, ?, ?, datetime('now'), datetime('now'))
+    ON CONFLICT(run_id) DO UPDATE SET
+      summary = excluded.summary,
+      report_json = excluded.report_json,
+      updated_at = datetime('now')
+  `);
+
+  stmt.run(runId, report.summary, JSON.stringify(report));
+}
+
+export function getRunQualityReport(runId: string) {
+  const stmt = db.prepare(`
+    SELECT report_json
+    FROM run_quality_reports
+    WHERE run_id = ?
+    LIMIT 1
+  `);
+
+  const row = stmt.get(runId) as { report_json: string } | undefined;
+  if (!row) return null;
+
+  try {
+    return JSON.parse(row.report_json) as RequirementQualityReport;
+  } catch {
+    return null;
+  }
+}
+
+export function upsertRunRefinementSummary(
+  runId: string,
+  summary: AutonomousRefinementSummary
+) {
+  const stmt = db.prepare(`
+    INSERT INTO run_refinement_summaries (
+      run_id,
+      summary_json,
+      created_at,
+      updated_at
+    )
+    VALUES (?, ?, datetime('now'), datetime('now'))
+    ON CONFLICT(run_id) DO UPDATE SET
+      summary_json = excluded.summary_json,
+      updated_at = datetime('now')
+  `);
+
+  stmt.run(runId, JSON.stringify(summary));
+}
+
+export function getRunRefinementSummary(runId: string) {
+  const stmt = db.prepare(`
+    SELECT summary_json
+    FROM run_refinement_summaries
+    WHERE run_id = ?
+    LIMIT 1
+  `);
+
+  const row = stmt.get(runId) as { summary_json: string } | undefined;
+  if (!row) return null;
+
+  try {
+    return JSON.parse(row.summary_json) as AutonomousRefinementSummary;
+  } catch {
+    return null;
+  }
+}
+
+export function updateRunGeneratedMetadata(params: {
+  runId: string;
+  prd: string;
+  majorDecision: string;
+}) {
+  const stmt = db.prepare(`
+    UPDATE runs
+    SET
+      prd = ?,
+      major_decision = ?,
+      last_saved_at = datetime('now')
+    WHERE run_id = ?
+  `);
+
+  stmt.run(params.prd, params.majorDecision, params.runId);
 }

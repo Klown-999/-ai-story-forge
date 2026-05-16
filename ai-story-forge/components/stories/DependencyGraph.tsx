@@ -1,608 +1,734 @@
 
 "use client";
 
-import { useMemo, useState } from "react";
+import React, {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
-  ChevronDown,
-  ChevronRight,
-  GitBranch,
-  Layers3,
-  Search,
-  ShieldCheck,
-  Sparkles,
-} from "lucide-react";
+  Background,
+  Controls,
+  MiniMap,
+  Panel,
+  ReactFlow,
+  ReactFlowProvider,
+  MarkerType,
+  type Edge,
+  type Node,
+  type NodeProps,
+  type NodeTypes,
+  type ReactFlowInstance,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
 
+import { Expand, Minimize2, Search, X } from "lucide-react";
+
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import type { Story } from "@/types";
-import { Input } from "@/components/ui/input";
 
-type Props = {
+type DependencyGraphProps = {
   stories: Story[];
 };
 
-type EpicGroup = {
-  epic: Story;
-  stories: Story[];
+type FlowNodeData = {
+  label: string;
+  story: Story;
+  selected: boolean;
+  related: boolean;
 };
 
-type DerivedStoryMeta = {
-  status: "Ready" | "Review" | "Needs Work";
-  confidence: number;
-  qualityScore: number;
-};
+type StoryFlowNode = Node<FlowNodeData, "storyNode">;
 
-function truncate(text: string, max = 40) {
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-}
+const StoryFlowNodeComponent = memo((props: NodeProps) => {
+  const typedProps = props as NodeProps<StoryFlowNode>;
+  const story = typedProps.data.story;
 
-function buildGroups(stories: Story[]): EpicGroup[] {
-  const byId = new Map(stories.map((story) => [story.id, story]));
-  const epics = stories.filter((story) => story.kind === "Epic");
+  const borderColor =
+    story.kind === "Epic"
+      ? typedProps.data.selected
+        ? "#0f172a"
+        : typedProps.data.related
+        ? "#334155"
+        : "#1e293b"
+      : typedProps.data.selected
+      ? "#2563eb"
+      : typedProps.data.related
+      ? "#60a5fa"
+      : "#cbd5e1";
 
-  return epics.map((epic) => {
-    const children = stories.filter((story) => {
-      if (story.kind !== "Story") return false;
-
-      return story.dependsOn.some(
-        (depId) => byId.get(depId)?.kind === "Epic" && depId === epic.id
-      );
-    });
-
-    return {
-      epic,
-      stories: children,
-    };
-  });
-}
-
-function estimateTone(estimate: string) {
-  switch ((estimate || "").toUpperCase()) {
-    case "XL":
-      return "bg-violet-50 text-violet-700 border-violet-200";
-    case "L":
-      return "bg-indigo-50 text-indigo-700 border-indigo-200";
-    case "M":
-      return "bg-sky-50 text-sky-700 border-sky-200";
-    case "S":
-      return "bg-emerald-50 text-emerald-700 border-emerald-200";
-    default:
-      return "bg-slate-100 text-slate-700 border-slate-200";
-  }
-}
-
-function statusTone(status: DerivedStoryMeta["status"]) {
-  switch (status) {
-    case "Ready":
-      return "bg-emerald-50 text-emerald-700 border-emerald-200";
-    case "Review":
-      return "bg-amber-50 text-amber-700 border-amber-200";
-    default:
-      return "bg-rose-50 text-rose-700 border-rose-200";
-  }
-}
-
-function deriveStoryMeta(story: Story): DerivedStoryMeta {
-  const acceptanceCount = story.acceptance.length;
-  const labelCount = story.labels.length;
-  const hasOwner = !!story.owner && story.owner !== "—";
-  const dependencyCount = story.dependsOn.length;
-
-  let qualityScore = 35;
-  qualityScore += Math.min(acceptanceCount * 12, 36);
-  qualityScore += Math.min(labelCount * 5, 10);
-  qualityScore += hasOwner ? 10 : 0;
-  qualityScore += dependencyCount > 0 ? 9 : 0;
-  qualityScore = Math.min(qualityScore, 100);
-
-  let confidence = 40;
-  confidence += Math.min(acceptanceCount * 10, 30);
-  confidence += hasOwner ? 10 : 0;
-  confidence += dependencyCount > 0 ? 10 : 0;
-  confidence += labelCount > 0 ? 5 : 0;
-  confidence = Math.min(confidence, 100);
-
-  let status: DerivedStoryMeta["status"] = "Needs Work";
-  if (acceptanceCount >= 3 && hasOwner) {
-    status = "Ready";
-  } else if (acceptanceCount >= 1) {
-    status = "Review";
-  }
-
-  return { status, confidence, qualityScore };
-}
-
-function deriveEpicSummary(stories: Story[]) {
-  if (stories.length === 0) {
-    return { ready: 0, review: 0, needsWork: 0, avgConfidence: 0 };
-  }
-
-  const metas = stories.map(deriveStoryMeta);
-
-  const ready = metas.filter((meta) => meta.status === "Ready").length;
-  const review = metas.filter((meta) => meta.status === "Review").length;
-  const needsWork = metas.filter((meta) => meta.status === "Needs Work").length;
-  const avgConfidence = Math.round(
-    metas.reduce((sum, meta) => sum + meta.confidence, 0) / metas.length
-  );
-
-  return { ready, review, needsWork, avgConfidence };
-}
-
-export default function DependencyGraph({ stories }: Props) {
-  const groups = useMemo(() => buildGroups(stories), [stories]);
-
-  const [collapsedEpics, setCollapsedEpics] = useState<Record<string, boolean>>(
-    {}
-  );
-  const [selectedStoryId, setSelectedStoryId] = useState<string | null>(
-    stories.find((story) => story.kind === "Story")?.id ?? null
-  );
-  const [search, setSearch] = useState("");
-  const [ownerFilter, setOwnerFilter] = useState("all");
-  const [estimateFilter, setEstimateFilter] = useState("all");
-
-  const allStories = stories.filter((story) => story.kind === "Story");
-
-  const ownerOptions = useMemo(() => {
-    return Array.from(
-      new Set(
-        allStories
-          .map((story) => story.owner)
-          .filter((owner) => owner && owner.trim())
-      )
-    ).sort();
-  }, [allStories]);
-
-  const filteredGroups = useMemo(() => {
-    const query = search.trim().toLowerCase();
-
-    return groups
-      .map((group) => {
-        const epicMatches =
-          !query ||
-          group.epic.title.toLowerCase().includes(query) ||
-          group.epic.id.toLowerCase().includes(query);
-
-        const filteredStories = group.stories.filter((story) => {
-          const matchesQuery =
-            !query ||
-            story.title.toLowerCase().includes(query) ||
-            story.id.toLowerCase().includes(query) ||
-            story.owner.toLowerCase().includes(query) ||
-            story.labels.join(" ").toLowerCase().includes(query);
-
-          const matchesOwner =
-            ownerFilter === "all" || story.owner === ownerFilter;
-
-          const matchesEstimate =
-            estimateFilter === "all" ||
-            (story.estimate || "").toUpperCase() === estimateFilter;
-
-          return matchesQuery && matchesOwner && matchesEstimate;
-        });
-
-        return {
-          ...group,
-          stories:
-            epicMatches && filteredStories.length === 0 && !query
-              ? group.stories.filter((story) => {
-                  const matchesOwner =
-                    ownerFilter === "all" || story.owner === ownerFilter;
-                  const matchesEstimate =
-                    estimateFilter === "all" ||
-                    (story.estimate || "").toUpperCase() === estimateFilter;
-                  return matchesOwner && matchesEstimate;
-                })
-              : filteredStories,
-        };
-      })
-      .filter((group) => {
-        if (!query && ownerFilter === "all" && estimateFilter === "all") {
-          return true;
-        }
-
-        const epicMatches =
-          !query ||
-          group.epic.title.toLowerCase().includes(query) ||
-          group.epic.id.toLowerCase().includes(query);
-
-        return epicMatches || group.stories.length > 0;
-      });
-  }, [groups, search, ownerFilter, estimateFilter]);
-
-  const selectedStory =
-    allStories.find((story) => story.id === selectedStoryId) ?? null;
-  const selectedStoryMeta = selectedStory ? deriveStoryMeta(selectedStory) : null;
-
-  if (stories.length === 0) {
-    return (
-      <div className="rounded-3xl border border-slate-200 bg-white p-6 text-sm text-slate-500 shadow-sm">
-        No dependency structure available yet.
-      </div>
-    );
-  }
-
-  if (groups.length === 0) {
-    return (
-      <div className="rounded-3xl border border-slate-200 bg-white p-6 text-sm text-slate-500 shadow-sm">
-        No epic/story hierarchy found yet.
-      </div>
-    );
-  }
-
-  const toggleEpic = (epicId: string) => {
-    setCollapsedEpics((prev) => ({
-      ...prev,
-      [epicId]: !prev[epicId],
-    }));
-  };
+  const background =
+    story.kind === "Epic"
+      ? "#f8fafc"
+      : typedProps.data.selected
+      ? "#eff6ff"
+      : "#ffffff";
 
   return (
-    <div className="rounded-3xl border border-slate-200 bg-white shadow-sm overflow-hidden">
-      {/* Header */}
-      <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
-        <div className="flex flex-col gap-4">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <h3 className="text-lg font-semibold tracking-tight text-slate-900">
-                Delivery Architecture Board
-              </h3>
-              <p className="mt-1 text-sm text-slate-500">
-                Compact view of epics, linked stories, and ownership.
-              </p>
+    <div
+      style={{
+        width: 300,
+        borderRadius: 18,
+        border: `2px solid ${borderColor}`,
+        background,
+        color: "#0f172a",
+        padding: 14,
+        boxShadow: "0 2px 6px rgba(15, 23, 42, 0.08)",
+        opacity: typedProps.data.selected || !typedProps.data.related ? 1 : 0.88,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 6,
+          marginBottom: 8,
+        }}
+      >
+        <span
+          style={{
+            fontSize: 11,
+            lineHeight: 1,
+            padding: "6px 10px",
+            borderRadius: 999,
+            border: "1px solid #cbd5e1",
+            background: story.kind === "Epic" ? "#e2e8f0" : "#ffffff",
+            color: "#0f172a",
+            fontWeight: 600,
+          }}
+        >
+          {story.kind}
+        </span>
+
+        <span
+          style={{
+            fontSize: 11,
+            lineHeight: 1,
+            padding: "6px 10px",
+            borderRadius: 999,
+            border: "1px solid #cbd5e1",
+            background: "#ffffff",
+            color: "#0f172a",
+            fontWeight: 600,
+          }}
+        >
+          {story.estimate}
+          {typeof story.storyPoints === "number"
+            ? ` • ${story.storyPoints} pts`
+            : ""}
+        </span>
+      </div>
+
+      <div
+        style={{
+          fontSize: 14,
+          fontWeight: 700,
+          color: "#0f172a",
+          lineHeight: 1.35,
+          whiteSpace: "normal",
+          wordBreak: "break-word",
+          overflowWrap: "anywhere",
+        }}
+      >
+        {story.title}
+      </div>
+
+      {story.storyFormat ? (
+        <div
+          style={{
+            marginTop: 8,
+            fontSize: 12,
+            lineHeight: 1.45,
+            color: "#334155",
+            whiteSpace: "normal",
+            wordBreak: "break-word",
+            overflowWrap: "anywhere",
+          }}
+        >
+          {story.storyFormat}
+        </div>
+      ) : null}
+    </div>
+  );
+});
+
+const nodeTypes: NodeTypes = {
+  storyNode: StoryFlowNodeComponent,
+};
+
+function buildGraphLayout(stories: Story[]) {
+  const storyMap = new Map<string, Story>();
+  stories.forEach((story) => storyMap.set(story.id, story));
+
+  const epicStories = stories.filter((story) => story.kind === "Epic");
+  const normalStories = stories.filter((story) => story.kind === "Story");
+
+  const dependents = new Map<string, string[]>();
+  const indegree = new Map<string, number>();
+
+  normalStories.forEach((story) => {
+    indegree.set(story.id, 0);
+    dependents.set(story.id, []);
+  });
+
+  const edges: Edge[] = [];
+
+  normalStories.forEach((story) => {
+    (story.dependsOn || []).forEach((dep) => {
+      if (storyMap.has(dep)) {
+        if (storyMap.get(dep)?.kind === "Story") {
+          dependents.get(dep)?.push(story.id);
+          indegree.set(story.id, (indegree.get(story.id) || 0) + 1);
+        }
+
+        edges.push({
+          id: `${dep}->${story.id}`,
+          source: dep,
+          target: story.id,
+          type: "smoothstep",
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+          },
+        });
+      }
+    });
+  });
+
+  const queue: string[] = [];
+  const level = new Map<string, number>();
+
+  indegree.forEach((value, key) => {
+    if (value === 0) {
+      queue.push(key);
+      level.set(key, 0);
+    }
+  });
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    const currentLevel = level.get(current) || 0;
+
+    for (const next of dependents.get(current) || []) {
+      const nextLevel = Math.max(level.get(next) ?? 0, currentLevel + 1);
+      level.set(next, nextLevel);
+
+      indegree.set(next, (indegree.get(next) || 0) - 1);
+      if ((indegree.get(next) || 0) === 0) {
+        queue.push(next);
+      }
+    }
+  }
+
+  normalStories.forEach((story) => {
+    if (!level.has(story.id)) level.set(story.id, 0);
+  });
+
+  const nodes: StoryFlowNode[] = [];
+
+  epicStories
+    .sort((a, b) => a.title.localeCompare(b.title))
+    .forEach((story, index) => {
+      nodes.push({
+        id: story.id,
+        type: "storyNode",
+        position: { x: 0, y: index * 200 },
+        draggable: false,
+        selectable: true,
+        data: {
+          label: story.title,
+          story,
+          selected: false,
+          related: false,
+        },
+      });
+    });
+
+  const levels = new Map<number, Story[]>();
+  normalStories.forEach((story) => {
+    const l = level.get(story.id) || 0;
+    if (!levels.has(l)) levels.set(l, []);
+    levels.get(l)!.push(story);
+  });
+
+  Array.from(levels.keys())
+    .sort((a, b) => a - b)
+    .forEach((lvl) => {
+      const columnStories = levels.get(lvl)!;
+      columnStories.sort((a, b) => a.title.localeCompare(b.title));
+
+      columnStories.forEach((story, index) => {
+        nodes.push({
+          id: story.id,
+          type: "storyNode",
+          position: {
+            x: 380 + lvl * 360,
+            y: index * 200,
+          },
+          draggable: false,
+          selectable: true,
+          data: {
+            label: story.title,
+            story,
+            selected: false,
+            related: false,
+          },
+        });
+      });
+    });
+
+  return { nodes, edges };
+}
+
+function DependencyGraphInner({ stories }: DependencyGraphProps) {
+  const [selectedStoryId, setSelectedStoryId] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [showEpics, setShowEpics] = useState(true);
+  const [showStories, setShowStories] = useState(true);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  const fullscreenRef = useRef<HTMLDivElement | null>(null);
+  const reactFlowInstanceRef =
+    useRef<ReactFlowInstance<StoryFlowNode, Edge> | null>(null);
+
+  const filteredStories = useMemo(() => {
+    return stories.filter((story) => {
+      if (!showEpics && story.kind === "Epic") return false;
+      if (!showStories && story.kind === "Story") return false;
+
+      if (!search.trim()) return true;
+
+      const q = search.trim().toLowerCase();
+      return (
+        story.title.toLowerCase().includes(q) ||
+        story.id.toLowerCase().includes(q) ||
+        (story.storyFormat || "").toLowerCase().includes(q)
+      );
+    });
+  }, [stories, search, showEpics, showStories]);
+
+  const { nodes: baseNodes, edges: baseEdges } = useMemo(
+    () => buildGraphLayout(filteredStories),
+    [filteredStories]
+  );
+
+  const directDependents = useMemo(() => {
+    const map = new Map<string, string[]>();
+    filteredStories.forEach((story) => {
+      map.set(story.id, []);
+    });
+
+    filteredStories.forEach((story) => {
+      (story.dependsOn || []).forEach((dep) => {
+        if (map.has(dep)) {
+          map.get(dep)!.push(story.id);
+        }
+      });
+    });
+
+    return map;
+  }, [filteredStories]);
+
+  const selectedStory =
+    filteredStories.find((story) => story.id === selectedStoryId) || null;
+
+  const relatedNodeIds = useMemo(() => {
+    if (!selectedStory) return new Set<string>();
+
+    const set = new Set<string>();
+    set.add(selectedStory.id);
+
+    (selectedStory.dependsOn || []).forEach((dep) => set.add(dep));
+    (directDependents.get(selectedStory.id) || []).forEach((dep) => set.add(dep));
+
+    return set;
+  }, [selectedStory, directDependents]);
+
+  const nodes = useMemo<StoryFlowNode[]>(() => {
+    return baseNodes.map((node) => {
+      const isSelected = selectedStoryId === node.id;
+      const isRelated = selectedStoryId ? relatedNodeIds.has(node.id) : true;
+
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          selected: isSelected,
+          related: isRelated,
+        },
+      };
+    });
+  }, [baseNodes, selectedStoryId, relatedNodeIds]);
+
+  const edges = useMemo<Edge[]>(() => {
+    return baseEdges.map((edge) => {
+      const isSelectedPath =
+        selectedStory &&
+        (edge.source === selectedStory.id ||
+          edge.target === selectedStory.id ||
+          (selectedStory.dependsOn || []).includes(edge.source) ||
+          (directDependents.get(selectedStory.id) || []).includes(edge.target));
+
+      return {
+        ...edge,
+        animated: !!isSelectedPath,
+        style: {
+          stroke: isSelectedPath ? "#2563eb" : "#94a3b8",
+          strokeWidth: isSelectedPath ? 2.8 : 1.4,
+          opacity: selectedStoryId && !isSelectedPath ? 0.3 : 1,
+        },
+      };
+    });
+  }, [baseEdges, selectedStory, selectedStoryId, directDependents]);
+
+  
+  const handleFullscreenToggle = useCallback(async () => {
+    if (!fullscreenRef.current) return;
+
+    try {
+      if (!document.fullscreenElement) {
+        await fullscreenRef.current.requestFullscreen();
+      } else {
+        await document.exitFullscreen();
+      }
+    } catch (error) {
+      console.error("Failed to toggle fullscreen:", error);
+    }
+  }, []);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      const active = !!document.fullscreenElement;
+      setIsFullscreen(active);
+
+      setTimeout(() => {
+        reactFlowInstanceRef.current?.fitView({ padding: 0.2, duration: 400 });
+      }, 120);
+    };
+
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () =>
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+  }, []);
+
+  if (!stories.length) {
+    return (
+      <div className="rounded-3xl border border-slate-200 bg-white p-6 text-sm text-slate-500">
+        No stories available yet. Generate a run to visualize dependencies.
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-3xl border border-slate-200 bg-white p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-wrap gap-2">
+            <Badge className="rounded-full border border-slate-900 bg-slate-50 text-slate-900">
+              Interactive graph
+            </Badge>
+            <Badge className="rounded-full border border-slate-300 bg-white text-slate-700">
+              Nodes: {filteredStories.length}
+            </Badge>
+            <Badge className="rounded-full border border-slate-300 bg-white text-slate-700">
+              Edges: {edges.length}
+            </Badge>
+          </div>
+
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <div className="flex items-center gap-2 rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm">
+              <Search className="h-4 w-4 text-slate-500" />
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search title / ID / story format"
+                className="w-[240px] bg-transparent outline-none"
+              />
+              {search ? (
+                <button
+                  type="button"
+                  onClick={() => setSearch("")}
+                  className="text-slate-400 hover:text-slate-700"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              ) : null}
             </div>
 
             <div className="flex flex-wrap gap-2">
-              <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-600">
-                <Layers3 className="mr-2 h-3.5 w-3.5" />
-                {groups.length} epic{groups.length === 1 ? "" : "s"}
-              </span>
-              <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-600">
-                <GitBranch className="mr-2 h-3.5 w-3.5" />
-                {allStories.length} stor{allStories.length === 1 ? "y" : "ies"}
-              </span>
+              <button
+                type="button"
+                onClick={() => setShowEpics((prev) => !prev)}
+                className={`rounded-2xl border px-3 py-2 text-sm ${
+                  showEpics
+                    ? "border-slate-900 bg-slate-900 text-white"
+                    : "border-slate-300 bg-white text-slate-700"
+                }`}
+              >
+                {showEpics ? "Hide epics" : "Show epics"}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowStories((prev) => !prev)}
+                className={`rounded-2xl border px-3 py-2 text-sm ${
+                  showStories
+                    ? "border-slate-900 bg-slate-900 text-white"
+                    : "border-slate-300 bg-white text-slate-700"
+                }`}
+              >
+                {showStories ? "Hide stories" : "Show stories"}
+              </button>
+
+              <button
+                type="button"
+                onClick={handleFullscreenToggle}
+                className="rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
+              >
+                {isFullscreen ? (
+                  <span className="flex items-center gap-2">
+                    <Minimize2 className="h-4 w-4" />
+                    Exit fullscreen
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-2">
+                    <Expand className="h-4 w-4" />
+                    Fullscreen
+                  </span>
+                )}
+              </button>
             </div>
           </div>
+        </div>
 
-          {/* compact filters */}
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-[1.2fr_0.8fr_0.7fr]">
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search..."
-                className="rounded-2xl pl-10"
-              />
-            </div>
-
-            <select
-              value={ownerFilter}
-              onChange={(e) => setOwnerFilter(e.target.value)}
-              className="rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm"
-            >
-              <option value="all">All owners</option>
-              {ownerOptions.map((owner) => (
-                <option key={owner} value={owner}>
-                  {owner}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={estimateFilter}
-              onChange={(e) => setEstimateFilter(e.target.value)}
-              className="rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm"
-            >
-              <option value="all">All estimates</option>
-              <option value="XL">XL</option>
-              <option value="L">L</option>
-              <option value="M">M</option>
-              <option value="S">S</option>
-            </select>
+        <div className="mt-4 flex flex-wrap gap-3 text-xs text-slate-600">
+          <div className="flex items-center gap-2">
+            <span className="inline-block h-3 w-3 rounded-full border-2 border-slate-900 bg-slate-50" />
+            Epic
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="inline-block h-3 w-3 rounded-full border border-slate-400 bg-white" />
+            Story
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="inline-block h-0.5 w-6 bg-blue-600" />
+            Selected dependency path
           </div>
         </div>
       </div>
 
-      {/* Compact board */}
-      <div className="divide-y divide-slate-200">
-        {filteredGroups.length === 0 ? (
-          <div className="px-5 py-8 text-sm text-slate-500">
-            No epics or stories matched the current filters.
-          </div>
-        ) : (
-          filteredGroups.map((group) => {
-            const epic = group.epic;
-            const childStories = group.stories;
-            const collapsed = !!collapsedEpics[epic.id];
-            const summary = deriveEpicSummary(childStories);
+      <div
+        className={`grid gap-4 ${
+          isFullscreen ? "grid-cols-[1fr_420px]" : "xl:grid-cols-[1fr_360px]"
+        }`}
+      >
+        <div
+          ref={fullscreenRef}
+          className={`overflow-hidden rounded-3xl border border-slate-200 bg-white ${
+            isFullscreen ? "h-screen" : "h-[720px]"
+          }`}
+        >
+          <ReactFlow<StoryFlowNode, Edge>
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={nodeTypes}
+            fitView
+            fitViewOptions={{ padding: 0.2 }}
+            onInit={(instance) => {
+              reactFlowInstanceRef.current = instance;
+            }}
+            onNodeClick={(_, node) => {
+              setSelectedStoryId(node.id);
+            }}
+            defaultEdgeOptions={{
+              type: "smoothstep",
+              markerEnd: { type: MarkerType.ArrowClosed },
+            }}
+          >
+            <Panel position="top-left">
+              <div className="rounded-2xl border border-slate-200 bg-white/90 px-3 py-2 text-xs text-slate-600 shadow-sm backdrop-blur">
+                Click a node to inspect its details and dependency path
+              </div>
+            </Panel>
 
-            return (
-              <div key={epic.id} className="px-5 py-5">
-                <div className="grid grid-cols-1 gap-4 xl:grid-cols-[250px_1fr_180px]">
-                  {/* epic */}
-                  <div>
-                    <button
-                      type="button"
-                      onClick={() => toggleEpic(epic.id)}
-                      className="w-full rounded-3xl border border-slate-200 bg-slate-50 p-4 text-left shadow-sm transition hover:border-slate-300 hover:bg-slate-100"
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <span className="inline-flex rounded-full bg-indigo-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-indigo-700">
-                          Epic
-                        </span>
-                        <span className="text-slate-500">
-                          {collapsed ? (
-                            <ChevronRight className="h-4 w-4" />
-                          ) : (
-                            <ChevronDown className="h-4 w-4" />
-                          )}
-                        </span>
-                      </div>
+            <MiniMap
+              pannable
+              zoomable
+              nodeStrokeWidth={3}
+              nodeColor={(node) => {
+                const typedNode = node as StoryFlowNode;
+                return typedNode.data?.story?.kind === "Epic"
+                  ? "#e2e8f0"
+                  : "#ffffff";
+              }}
+            />
+            <Controls />
+            <Background gap={20} size={1} />
+          </ReactFlow>
+        </div>
 
-                      <h4 className="mt-3 text-base font-semibold leading-5 text-slate-900">
-                        {truncate(epic.title, 34)}
-                      </h4>
+        <Card
+          className={`rounded-3xl border-slate-200 shadow-sm ${
+            isFullscreen ? "h-screen overflow-auto" : ""
+          }`}
+        >
+          <CardHeader>
+            <CardTitle className="text-lg">Story details panel</CardTitle>
+          </CardHeader>
 
-                      <div className="mt-3 space-y-1 text-xs text-slate-600">
-                        <p>{epic.id}</p>
-                        <p>Owner: {epic.owner || "—"}</p>
-                        <p>Estimate: {epic.estimate || "—"}</p>
-                        <p>{childStories.length} stories</p>
-                      </div>
-
-                      <div className="mt-3 flex flex-wrap gap-1.5">
-                        <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
-                          {summary.ready} ready
-                        </span>
-                        <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">
-                          {summary.review} review
-                        </span>
-                        <span className="inline-flex rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-700">
-                          {summary.avgConfidence}%
-                        </span>
-                      </div>
-                    </button>
+          <CardContent className="space-y-5">
+            {selectedStory ? (
+              <>
+                <div>
+                  <div className="flex flex-wrap gap-2">
+                    <Badge className="rounded-full">{selectedStory.kind}</Badge>
+                    <Badge variant="outline" className="rounded-full">
+                      Estimate: {selectedStory.estimate}
+                    </Badge>
+                    {typeof selectedStory.storyPoints === "number" ? (
+                      <Badge variant="outline" className="rounded-full">
+                        Story points: {selectedStory.storyPoints}
+                      </Badge>
+                    ) : null}
                   </div>
 
-                  {/* compact story tiles */}
+                  <h3 className="mt-3 text-lg font-semibold text-slate-900">
+                    {selectedStory.title}
+                  </h3>
+
+                  <p className="mt-2 text-sm text-slate-600">
+                    Owner: {selectedStory.owner}
+                  </p>
+                </div>
+
+                {selectedStory.storyFormat ? (
                   <div>
-                    {collapsed ? (
-                      <div className="rounded-3xl border border-dashed border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">
-                        This epic is collapsed.
-                      </div>
-                    ) : childStories.length === 0 ? (
-                      <div className="rounded-3xl border border-dashed border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">
-                        No linked stories matched the current filters.
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                        {childStories.map((story) => {
-                          const selected = story.id === selectedStoryId;
-                          const meta = deriveStoryMeta(story);
-
-                          return (
-                            <button
-                              key={story.id}
-                              type="button"
-                              onClick={() => setSelectedStoryId(story.id)}
-                              className={`rounded-3xl border p-4 text-left shadow-sm transition ${
-                                selected
-                                  ? "border-slate-900 bg-slate-50"
-                                  : "border-slate-200 bg-white hover:border-slate-300"
-                              }`}
-                            >
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span
-                                  className={`inline-flex rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${estimateTone(
-                                    story.estimate
-                                  )}`}
-                                >
-                                  {story.estimate || "—"}
-                                </span>
-
-                                <span
-                                  className={`inline-flex rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${statusTone(
-                                    meta.status
-                                  )}`}
-                                >
-                                  {meta.status}
-                                </span>
-                              </div>
-
-                              <h5 className="mt-3 text-sm font-semibold leading-5 text-slate-900">
-                                {truncate(story.title, 42)}
-                              </h5>
-
-                              <div className="mt-3 space-y-1 text-xs text-slate-600">
-                                <p>Owner: {story.owner || "—"}</p>
-                                <p>Acceptance: {story.acceptance.length}</p>
-                                <p>Confidence: {meta.confidence}%</p>
-                              </div>
-
-                              {story.labels.length > 0 ? (
-                                <div className="mt-3 flex flex-wrap gap-1.5">
-                                  {story.labels.slice(0, 2).map((label) => (
-                                    <span
-                                      key={`${story.id}-${label}`}
-                                      className="inline-flex rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-medium text-slate-600"
-                                    >
-                                      {label}
-                                    </span>
-                                  ))}
-                                  {story.labels.length > 2 ? (
-                                    <span className="inline-flex rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-medium text-slate-600">
-                                      +{story.labels.length - 2}
-                                    </span>
-                                  ) : null}
-                                </div>
-                              ) : null}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* small summary lane */}
-                  <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4 shadow-sm">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">
-                      Summary
+                    <p className="mb-2 font-semibold text-slate-900">
+                      Story format
                     </p>
-                    <div className="mt-3 space-y-2 text-sm text-slate-700">
-                      <p>
-                        <span className="font-medium text-slate-900">Ready:</span>{" "}
-                        {summary.ready}
-                      </p>
-                      <p>
-                        <span className="font-medium text-slate-900">Review:</span>{" "}
-                        {summary.review}
-                      </p>
-                      <p>
-                        <span className="font-medium text-slate-900">Needs Work:</span>{" "}
-                        {summary.needsWork}
-                      </p>
-                      <p>
-                        <span className="font-medium text-slate-900">Avg confidence:</span>{" "}
-                        {summary.avgConfidence}%
-                      </p>
+                    <div className="rounded-2xl border bg-slate-50 p-3 text-sm text-slate-700">
+                      {selectedStory.storyFormat}
                     </div>
                   </div>
-                </div>
-              </div>
-            );
-          })
-        )}
-      </div>
+                ) : null}
 
-      {/* Compact inspector below board */}
-      <div className="border-t border-slate-200 bg-slate-50 px-5 py-5">
-        <div className="mb-3">
-          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
-            Story Inspector
-          </p>
-          <p className="mt-1 text-sm text-slate-500">
-            Selected story details appear here without taking over the main screen.
-          </p>
-        </div>
+                {selectedStory.labels?.length ? (
+                  <div>
+                    <p className="mb-2 font-semibold text-slate-900">Labels</p>
+                    <div className="flex flex-wrap gap-2">
+                      {selectedStory.labels.map((label: string) => (
+                        <Badge
+                          key={`${selectedStory.id}-label-${label}`}
+                          variant="outline"
+                          className="rounded-full"
+                        >
+                          {label}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
 
-        {selectedStory && selectedStoryMeta ? (
-          <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.2fr_1fr_1fr_1fr]">
-            <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="flex flex-wrap items-center gap-2">
-                <span
-                  className={`inline-flex rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${estimateTone(
-                    selectedStory.estimate
-                  )}`}
-                >
-                  {selectedStory.estimate || "—"}
-                </span>
-                <span
-                  className={`inline-flex rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${statusTone(
-                    selectedStoryMeta.status
-                  )}`}
-                >
-                  {selectedStoryMeta.status}
-                </span>
-              </div>
+                {selectedStory.dependsOn?.length ? (
+                  <div>
+                    <p className="mb-2 font-semibold text-slate-900">
+                      Prerequisites
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {selectedStory.dependsOn.map((dep: string) => (
+                        <Badge
+                          key={`${selectedStory.id}-dep-${dep}`}
+                          variant="outline"
+                          className="rounded-full"
+                        >
+                          {dep}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
 
-              <h4 className="mt-3 text-base font-semibold leading-6 text-slate-900">
-                {selectedStory.title}
-              </h4>
+                {(directDependents.get(selectedStory.id) || []).length > 0 ? (
+                  <div>
+                    <p className="mb-2 font-semibold text-slate-900">
+                      Direct dependents
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {(directDependents.get(selectedStory.id) || []).map(
+                        (dep: string) => (
+                          <Badge
+                            key={`${selectedStory.id}-dependent-${dep}`}
+                            variant="outline"
+                            className="rounded-full"
+                          >
+                            {dep}
+                          </Badge>
+                        )
+                      )}
+                    </div>
+                  </div>
+                ) : null}
 
-              <div className="mt-3 space-y-1 text-sm text-slate-600">
-                <p>Owner: {selectedStory.owner || "Unassigned"}</p>
+                {selectedStory.acceptance?.length ? (
+                  <div>
+                    <p className="mb-2 font-semibold text-slate-900">
+                      Acceptance criteria
+                    </p>
+                    <ul className="list-disc space-y-2 pl-5 text-sm text-slate-700">
+                      {selectedStory.acceptance.map(
+                        (item: string, index: number) => (
+                          <li key={`${selectedStory.id}-acceptance-${index}`}>
+                            {item}
+                          </li>
+                        )
+                      )}
+                    </ul>
+                  </div>
+                ) : null}
+
+                {selectedStory.edgeCases?.length ? (
+                  <div>
+                    <p className="mb-2 font-semibold text-slate-900">
+                      Edge cases
+                    </p>
+                    <ul className="list-disc space-y-2 pl-5 text-sm text-slate-700">
+                      {selectedStory.edgeCases.map(
+                        (item: string, index: number) => (
+                          <li key={`${selectedStory.id}-edge-${index}`}>
+                            {item}
+                          </li>
+                        )
+                      )}
+                    </ul>
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className="space-y-3 text-sm text-slate-600">
+                <p className="font-semibold text-slate-900">
+                  Story details panel
+                </p>
+                <p>Click a node to inspect story details.</p>
                 <p>
-                  Depends on:{" "}
-                  {selectedStory.dependsOn.length > 0
-                    ? selectedStory.dependsOn.join(", ")
-                    : "None"}
+                  Use fullscreen mode for a larger architecture-style view.
                 </p>
               </div>
-            </div>
-
-            <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="flex items-center gap-2">
-                <ShieldCheck className="h-4 w-4 text-slate-500" />
-                <p className="text-sm font-semibold text-slate-900">
-                  Acceptance
-                </p>
-              </div>
-              {selectedStory.acceptance.length > 0 ? (
-                <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-slate-600">
-                  {selectedStory.acceptance.slice(0, 4).map((item, index) => (
-                    <li key={`${selectedStory.id}-acc-${index}`}>{item}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-3 text-sm text-slate-500">
-                  No acceptance criteria.
-                </p>
-              )}
-            </div>
-
-            <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="flex items-center gap-2">
-                <Sparkles className="h-4 w-4 text-slate-500" />
-                <p className="text-sm font-semibold text-slate-900">
-                  Labels
-                </p>
-              </div>
-              {selectedStory.labels.length > 0 ? (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {selectedStory.labels.map((label) => (
-                    <span
-                      key={`${selectedStory.id}-${label}`}
-                      className="inline-flex rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-medium text-slate-600"
-                    >
-                      {label}
-                    </span>
-                  ))}
-                </div>
-              ) : (
-                <p className="mt-3 text-sm text-slate-500">No labels.</p>
-              )}
-            </div>
-
-            <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-              <p className="text-sm font-semibold text-slate-900">
-                Health Summary
-              </p>
-
-              <div className="mt-3 space-y-3">
-                <div>
-                  <div className="mb-1 flex items-center justify-between text-xs text-slate-500">
-                    <span>Confidence</span>
-                    <span>{selectedStoryMeta.confidence}%</span>
-                  </div>
-                  <div className="h-2 rounded-full bg-slate-100">
-                    <div
-                      className="h-2 rounded-full bg-sky-500"
-                      style={{ width: `${selectedStoryMeta.confidence}%` }}
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <div className="mb-1 flex items-center justify-between text-xs text-slate-500">
-                    <span>Quality</span>
-                    <span>{selectedStoryMeta.qualityScore}%</span>
-                  </div>
-                  <div className="h-2 rounded-full bg-slate-100">
-                    <div
-                      className="h-2 rounded-full bg-emerald-500"
-                      style={{ width: `${selectedStoryMeta.qualityScore}%` }}
-                    />
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="rounded-3xl border border-dashed border-slate-200 bg-white p-5 text-sm text-slate-500">
-            Select a story card to inspect it.
-          </div>
-        )}
+            )}
+          </CardContent>
+        </Card>
       </div>
     </div>
   );
 }
+
+export default function DependencyGraph(props: DependencyGraphProps) {
+  return (
+    <ReactFlowProvider>
+      <DependencyGraphInner {...props} />
+    </ReactFlowProvider>
+  );
+}
+``

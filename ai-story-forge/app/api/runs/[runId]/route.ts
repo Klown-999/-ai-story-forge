@@ -1,14 +1,20 @@
 
 import { NextResponse } from "next/server";
 import { requireAppUser } from "@/lib/authz";
-import { getRunById, getStoriesForRun, userCanAccessRun } from "@/lib/security-db";
+import {
+  getRunById,
+  getStoriesForRun,
+  getRunQualityReport,
+  getRunRefinementSummary,
+  userCanAccessRun,
+} from "@/lib/security-db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(
   _request: Request,
-  context: { params: Promise<{ runId: string }> }
+  { params }: { params: Promise<{ runId: string }> }
 ) {
   try {
     const authResult = await requireAppUser();
@@ -20,31 +26,20 @@ export async function GET(
       );
     }
 
-    const { runId } = await context.params;
-
-    if (!runId) {
-      return NextResponse.json(
-        { message: "runId is required" },
-        { status: 400 }
-      );
-    }
+    const { runId } = await params;
 
     if (!userCanAccessRun(authResult.user.id, runId)) {
-      return NextResponse.json(
-        { message: "Run not found" },
-        { status: 404 }
-      );
+      return NextResponse.json({ message: "Run not found" }, { status: 404 });
     }
 
     const run = getRunById(runId);
     if (!run) {
-      return NextResponse.json(
-        { message: "Run not found" },
-        { status: 404 }
-      );
+      return NextResponse.json({ message: "Run not found" }, { status: 404 });
     }
 
     const stories = getStoriesForRun(runId);
+    const qualityReport = getRunQualityReport(runId);
+    const refinementSummary = getRunRefinementSummary(runId);
 
     return NextResponse.json({
       ok: true,
@@ -52,18 +47,17 @@ export async function GET(
         id: run.run_id,
         title: run.title,
         date: run.date,
-        prd: run.prd,
-        majorDecision: run.major_decision,
         stories: run.story_count,
         jira: run.jira_count,
-        status: run.status,
+        prd: run.prd,
+        majorDecision: run.major_decision,
         sourceType: run.source_type,
         sourceFileName: run.source_file_name,
-        createdAt: run.created_at,
-        updatedAt: run.updated_at,
         lastSavedAt: run.last_saved_at,
       },
       stories,
+      qualityReport,
+      refinementSummary,
     });
   } catch (error) {
     console.error("GET /api/runs/[runId] failed:", error);

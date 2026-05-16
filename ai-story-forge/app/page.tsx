@@ -1,7 +1,5 @@
 
-"use client";
-
-import React, { useEffect, useMemo, useRef, useState } from "react";
+"use client";import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -47,15 +45,10 @@ import {
   getRunDetails,
   getRuns,
   uploadPrdFile,
+  type CurrentUser,
+  type RequirementQualityReport,
+  type AutonomousRefinementSummary,
 } from "@/lib/api";
-
-type CurrentUser = {
-  id: string;
-  email: string;
-  name: string;
-  role: "admin" | "editor" | "viewer";
-  provider?: string | null;
-};
 
 function getRunTitleFromPrd(prdText: string) {
   const lines = prdText
@@ -110,6 +103,17 @@ function upsertRun(run: StoredRun, previous: StoredRun[]) {
   return next;
 }
 
+function qualitySeverityTone(severity: "Blocker" | "Warning" | "Suggestion") {
+  switch (severity) {
+    case "Blocker":
+      return "border-rose-200 bg-rose-50 text-rose-700";
+    case "Warning":
+      return "border-amber-200 bg-amber-50 text-amber-700";
+    default:
+      return "border-sky-200 bg-sky-50 text-sky-700";
+  }
+}
+
 export default function AIAgileStoryForgeWebsite() {
   const [tab, setTab] = useState("dashboard");
   const [processing, setProcessing] = useState(false);
@@ -151,6 +155,16 @@ export default function AIAgileStoryForgeWebsite() {
   const [exportTitle, setExportTitle] = useState("AI Story Forge Export");
   const [downloading, setDownloading] = useState(false);
 
+  const [generationStatus, setGenerationStatus] = useState<
+    "idle" | "queued" | "processing" | "ready" | "failed"
+  >("idle");
+  const [generationError, setGenerationError] = useState("");
+
+  const [qualityReport, setQualityReport] =
+    useState<RequirementQualityReport | null>(null);
+  const [refinementSummary, setRefinementSummary] =
+    useState<AutonomousRefinementSummary | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const wordCount = useMemo(
@@ -168,6 +182,17 @@ export default function AIAgileStoryForgeWebsite() {
 
   const currentRun = runs.find((run) => run.id === currentRunId) || null;
   const latestActivities = runActivity.slice(0, 4);
+
+  const minorCorrections = useMemo(() => {
+    return runActivity
+      .filter((activity) => activity.title === "Minor corrections applied")
+      .flatMap((activity) =>
+        activity.description
+          .split(";")
+          .map((item) => item.trim())
+          .filter(Boolean)
+      );
+  }, [runActivity]);
 
   useEffect(() => {
     if (currentRun?.title) {
@@ -231,7 +256,7 @@ export default function AIAgileStoryForgeWebsite() {
       if (
         message.includes("Run activity not found") ||
         message.includes("(404)") ||
-        message.includes("\"Run activity not found\"")
+        message.includes('"Run activity not found"')
       ) {
         console.warn("Run activity missing for run, continuing safely:", runId);
         setRunActivity([]);
@@ -317,6 +342,8 @@ export default function AIAgileStoryForgeWebsite() {
         setRunActivity([]);
         setStories([]);
         setMajorDecision("Pending");
+        setQualityReport(null);
+        setRefinementSummary(null);
         return serverRuns;
       }
 
@@ -369,6 +396,10 @@ export default function AIAgileStoryForgeWebsite() {
       setUploadedSourceFileName(result.run.sourceFileName || "");
       setUploadedSourceType(result.run.sourceType || "");
       setUploadToken("");
+      setGenerationStatus("idle");
+      setGenerationError("");
+      setQualityReport(result.qualityReport ?? null);
+      setRefinementSummary(result.refinementSummary ?? null);
 
       if (options?.switchTab ?? true) {
         setTab("workspace");
@@ -406,11 +437,114 @@ export default function AIAgileStoryForgeWebsite() {
       } else {
         setStories([]);
         setRunActivity([]);
+        setQualityReport(null);
+        setRefinementSummary(null);
       }
     }
 
     initializeRuns();
   }, []);
+
+  const sleep = (ms: number) =>
+    new Promise((resolve) => setTimeout(resolve, ms));
+
+  const pollRunStatus = async (runId: string) => {
+    const maxPolls = 300; // ~12.5 minutes at 2.5s
+
+    for (let attempt = 0; attempt < maxPolls; attempt++) {
+      try {
+        const response = await fetch(`/api/runs/${runId}/status`, {
+          method: "GET",
+          cache: "no-store",
+        });
+
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(
+            text || `Failed to load generation status (${response.status})`
+          );
+        }
+
+        const data = (await response.json()) as {
+          ok: true;
+          runId: string;
+          status: "queued" | "processing" | "ready" | "failed" | "unknown";
+          errorMessage?: string | null;
+        };
+
+        if (data.status === "queued" || data.status === "processing") {
+          setGenerationStatus(data.status);
+          await sleep(2500);
+          continue;
+        }
+
+        if (data.status === "ready") {
+          setGenerationStatus("ready");
+          setGenerationError("");
+
+          const refreshed = await refreshRuns(runId);
+
+          const targetRun = refreshed.find((run) => run.id === runId);
+          if (targetRun) {
+            await restoreRun(targetRun, { switchTab: true });
+          } else {
+            const details = await getRunDetails(runId);
+
+            const restoredRun: StoredRun = {
+              id: details.run.id,
+              title: details.run.title,
+              date: details.run.date,
+              stories: details.run.stories,
+              jira: details.run.jira,
+              prd: details.run.prd,
+              generatedStories: details.stories,
+              majorDecision: details.run.majorDecision || "Pending",
+              exportedFormats: [],
+              lastSavedAt: details.run.lastSavedAt || new Date().toISOString(),
+            };
+
+            setRuns((prev) => upsertRun(restoredRun, prev));
+            await restoreRun(restoredRun, { switchTab: true });
+          }
+
+          setProcessing(false);
+          return;
+        }
+
+        if (data.status === "failed") {
+          setGenerationStatus("failed");
+          setGenerationError(data.errorMessage || "Generation failed");
+          setProcessing(false);
+          return;
+        }
+
+        setGenerationStatus("failed");
+        setGenerationError("Unknown generation status returned by server");
+        setProcessing(false);
+        return;
+      } catch (error) {
+        console.error("Polling run status failed:", error);
+
+        if (attempt < maxPolls - 1) {
+          await sleep(2500);
+          continue;
+        }
+
+        setGenerationStatus("processing");
+        setGenerationError(
+          "Generation is still running in the background. Please refresh the run in a few moments."
+        );
+        setProcessing(false);
+        return;
+      }
+    }
+
+    setGenerationStatus("processing");
+    setGenerationError(
+      "Generation is still running in the background. Please refresh the run in a few moments."
+    );
+    setProcessing(false);
+  };
 
   const handleDownloadDocuments = async () => {
     if (!currentRunId) return;
@@ -450,6 +584,13 @@ export default function AIAgileStoryForgeWebsite() {
 
     try {
       setProcessing(true);
+      setGenerationStatus("queued");
+      setGenerationError("");
+      setShowApproval(false);
+      setSelectedStoryIds([]);
+      setQualityReport(null);
+      setRefinementSummary(null);
+      setTab("workspace");
 
       const response = await generateStories({
         prdText: prd,
@@ -459,42 +600,46 @@ export default function AIAgileStoryForgeWebsite() {
         uploadToken: uploadToken || undefined,
       });
 
-      setStories(response.stories);
       setCurrentRunId(response.runId);
-      setShowApproval(response.correctionPreview.requiresApproval);
-      setMajorDecision("Pending");
-      setSelectedStoryIds([]);
-      setTab("workspace");
 
       const runTitle = getRunTitleFromPrd(prd);
       const today = new Date().toISOString().split("T")[0];
 
-      const newRun: StoredRun = {
+      const queuedRun: StoredRun = {
         id: response.runId,
         title: runTitle || "Generated PRD Run",
         date: today,
-        stories: response.summary.storyCount,
+        stories: 0,
         jira: 0,
         prd,
-        generatedStories: response.stories,
+        generatedStories: [],
         majorDecision: "Pending",
         exportedFormats: [],
         lastSavedAt: new Date().toISOString(),
       };
 
-      setRuns((prev) => upsertRun(newRun, prev));
-      await refreshRuns(response.runId);
-      await restoreRun(newRun, { switchTab: true });
+      setRuns((prev) => upsertRun(queuedRun, prev));
+      setRunActivity([
+        {
+          id: `queued-${response.runId}`,
+          type: "run_created",
+          title: "Generation queued",
+          description: "The AI generation job has been queued.",
+          timestamp: new Date().toISOString(),
+        },
+      ]);
 
       setUploadToken("");
       setUploadedSourceFileName("");
       setUploadedSourceType("");
+
+      await pollRunStatus(response.runId);
     } catch (error) {
-      console.error("Failed to generate stories:", error);
-      alert(
+      console.error("Failed to queue or process generation:", error);
+      setGenerationStatus("failed");
+      setGenerationError(
         error instanceof Error ? error.message : "Failed to generate stories"
       );
-    } finally {
       setProcessing(false);
     }
   };
@@ -510,7 +655,8 @@ export default function AIAgileStoryForgeWebsite() {
             Download Stories as Documents
           </p>
           <p className="mt-1 text-sm text-slate-500">
-            Download the selected run as JSON, Markdown, CSV, TXT, DOCX, or PDF.
+            Download the selected run as JSON, Markdown, CSV, TXT, DOCX, or
+            PDF.
           </p>
         </div>
 
@@ -772,8 +918,9 @@ export default function AIAgileStoryForgeWebsite() {
 
                   <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-600 md:text-base">
                     This version uses authenticated APIs for run access, PRD
-                    upload, story generation, run sharing, dependency
-                    visualization, and activity tracking.
+                    upload, autonomous refinement, story generation, run
+                    sharing, dependency visualization, activity tracking, and
+                    requirement quality analysis.
                   </p>
 
                   <div className="mt-5 flex flex-wrap gap-3">
@@ -1013,7 +1160,7 @@ export default function AIAgileStoryForgeWebsite() {
                         Primary Workflow
                       </CardTitle>
                       <CardDescription>
-                        Current authenticated prototype flow
+                        Current authenticated AI-assisted prototype flow
                       </CardDescription>
                     </CardHeader>
 
@@ -1032,12 +1179,12 @@ export default function AIAgileStoryForgeWebsite() {
                         {
                           icon: Wand2,
                           title: "Generate Stories",
-                          body: "Backend route builds stories dynamically and saves them to SQLite.",
+                          body: "Background AI jobs autonomously refine the PRD and generate stories.",
                         },
                         {
                           icon: History,
                           title: "Track Activity",
-                          body: "Run creation and uploads are visible in a timeline.",
+                          body: "Run creation, corrections, quality-analysis events, and refinement rounds are visible.",
                         },
                       ].map((item, idx) => {
                         const Icon = item.icon;
@@ -1114,7 +1261,7 @@ export default function AIAgileStoryForgeWebsite() {
                           onClick={runGeneration}
                         >
                           <Wand2 className="mr-2 h-4 w-4" />
-                          {processing ? "Generating..." : "Generate stories"}
+                          {processing ? "Submitting..." : "Generate stories"}
                         </Button>
                       </div>
                     </div>
@@ -1161,11 +1308,383 @@ export default function AIAgileStoryForgeWebsite() {
                       >
                         {overLimit
                           ? `Input exceeds the ${WORD_LIMIT}-word limit.`
-                          : "Dynamic PRD-driven generation is enabled for this build."}
+                          : "AI-driven decomposition is enabled for this build."}
                       </span>
                     </div>
                   </CardContent>
                 </Card>
+
+                {generationStatus !== "idle" ? (
+                  <Card
+                    className={`rounded-3xl shadow-sm ${
+                      generationStatus === "failed"
+                        ? "border-rose-200 bg-rose-50/70"
+                        : generationStatus === "ready"
+                        ? "border-emerald-200 bg-emerald-50/70"
+                        : generationError
+                        ? "border-amber-200 bg-amber-50/70"
+                        : "border-sky-200 bg-sky-50/70"
+                    }`}
+                  >
+                    <CardHeader>
+                      <CardTitle
+                        className={`text-lg ${
+                          generationStatus === "failed"
+                            ? "text-rose-900"
+                            : generationStatus === "ready"
+                            ? "text-emerald-900"
+                            : generationError
+                            ? "text-amber-900"
+                            : "text-sky-900"
+                        }`}
+                      >
+                        {generationStatus === "queued" && "Generation queued"}
+                        {generationStatus === "processing" &&
+                          !generationError &&
+                          "Generation in progress"}
+                        {generationStatus === "processing" &&
+                          generationError &&
+                          "Generation still running"}
+                        {generationStatus === "ready" &&
+                          "Generation completed"}
+                        {generationStatus === "failed" && "Generation failed"}
+                      </CardTitle>
+
+                      <CardDescription
+                        className={
+                          generationStatus === "failed"
+                            ? "text-rose-800"
+                            : generationStatus === "ready"
+                            ? "text-emerald-800"
+                            : generationError
+                            ? "text-amber-800"
+                            : "text-sky-800"
+                        }
+                      >
+                        {generationStatus === "queued" &&
+                          "Your request has been accepted and is waiting in the background queue."}
+                        {generationStatus === "processing" &&
+                          !generationError &&
+                          "The AI pipeline is autonomously refining and processing this PRD in the background."}
+                        {generationStatus === "processing" &&
+                          generationError &&
+                          "The generation is still running in the background. Refresh this run in a few moments if needed."}
+                        {generationStatus === "ready" &&
+                          "The generated run is ready and has been loaded into the workspace."}
+                        {generationStatus === "failed" &&
+                          "The generation job failed. See the message below for details."}
+                      </CardDescription>
+                    </CardHeader>
+
+                    <CardContent>
+                      <div className="flex flex-wrap gap-2">
+                        {currentRunId ? (
+                          <Badge className="rounded-full">{currentRunId}</Badge>
+                        ) : null}
+
+                        <Badge variant="outline" className="rounded-full">
+                          Status: {generationStatus}
+                        </Badge>
+                      </div>
+
+                      {generationError ? (
+                        <div className="mt-4 rounded-2xl border bg-white p-4 text-sm">
+                          {generationError}
+                        </div>
+                      ) : null}
+                    </CardContent>
+                  </Card>
+                ) : null}
+
+                {minorCorrections.length > 0 ? (
+                  <Card className="rounded-3xl border-emerald-200 bg-emerald-50/60 shadow-sm">
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2 text-lg text-emerald-900">
+                        <Sparkles className="h-5 w-5" />
+                        Minor corrections applied
+                      </CardTitle>
+                      <CardDescription className="text-emerald-800">
+                        The AI made small, non-meaning-changing improvements to
+                        clarity or formatting.
+                      </CardDescription>
+                    </CardHeader>
+
+                    <CardContent>
+                      <ul className="list-disc space-y-2 pl-5 text-sm text-emerald-900">
+                        {minorCorrections.map((item, index) => (
+                          <li key={`minor-correction-${index}`}>{item}</li>
+                        ))}
+                      </ul>
+                    </CardContent>
+                  </Card>
+                ) : null}
+
+                {refinementSummary ? (
+                  <Card className="rounded-3xl border-slate-200 shadow-sm">
+                    <CardHeader>
+                      <CardTitle className="text-lg">
+                        Autonomous Quality Refinement Summary
+                      </CardTitle>
+                      <CardDescription>
+                        The background worker refined the PRD automatically
+                        before final story generation.
+                      </CardDescription>
+                    </CardHeader>
+
+                    <CardContent className="space-y-5">
+                      <div className="flex flex-wrap gap-2">
+                        <Badge className="rounded-full border border-slate-200 bg-slate-50 text-slate-700">
+                          Rounds used: {refinementSummary.roundsUsed}/
+                          {refinementSummary.maxRefinementRounds}
+                        </Badge>
+                        <Badge className="rounded-full border border-slate-200 bg-slate-50 text-slate-700">
+                          Stop reason:{" "}
+                          {refinementSummary.stoppedReason.replace(/_/g, " ")}
+                        </Badge>
+                      </div>
+
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div className="rounded-2xl border bg-slate-50 p-4">
+                          <p className="font-semibold text-slate-900">
+                            Before refinement
+                          </p>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <Badge className="rounded-full border border-rose-200 bg-rose-50 text-rose-700">
+                              Blockers:{" "}
+                              {refinementSummary.originalCounts.blockers}
+                            </Badge>
+                            <Badge className="rounded-full border border-amber-200 bg-amber-50 text-amber-700">
+                              Warnings:{" "}
+                              {refinementSummary.originalCounts.warnings}
+                            </Badge>
+                            <Badge className="rounded-full border border-sky-200 bg-sky-50 text-sky-700">
+                              Suggestions:{" "}
+                              {refinementSummary.originalCounts.suggestions}
+                            </Badge>
+                          </div>
+                        </div>
+
+                        <div className="rounded-2xl border bg-slate-50 p-4">
+                          <p className="font-semibold text-slate-900">
+                            After refinement
+                          </p>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <Badge className="rounded-full border border-rose-200 bg-rose-50 text-rose-700">
+                              Blockers: {refinementSummary.finalCounts.blockers}
+                            </Badge>
+                            <Badge className="rounded-full border border-amber-200 bg-amber-50 text-amber-700">
+                              Warnings: {refinementSummary.finalCounts.warnings}
+                            </Badge>
+                            <Badge className="rounded-full border border-sky-200 bg-sky-50 text-sky-700">
+                              Suggestions:{" "}
+                              {refinementSummary.finalCounts.suggestions}
+                            </Badge>
+                          </div>
+                        </div>
+                      </div>
+
+                      {refinementSummary.rounds.length > 0 ? (
+                        <div className="space-y-4">
+                          {refinementSummary.rounds.map((round) => (
+                            <div
+                              key={`refinement-round-${round.round}`}
+                              className="rounded-2xl border border-slate-200 bg-white p-4"
+                            >
+                              <p className="font-semibold text-slate-900">
+                                Refinement round {round.round}
+                              </p>
+
+                              <div className="mt-3 grid gap-4 md:grid-cols-2">
+                                <div className="rounded-xl border bg-slate-50 p-3 text-sm">
+                                  <p className="font-medium text-slate-900">
+                                    Input counts
+                                  </p>
+                                  <p className="mt-2 text-slate-700">
+                                    Blockers: {round.inputCounts.blockers},
+                                    Warnings: {round.inputCounts.warnings},
+                                    Suggestions:{" "}
+                                    {round.inputCounts.suggestions}
+                                  </p>
+                                </div>
+
+                                <div className="rounded-xl border bg-slate-50 p-3 text-sm">
+                                  <p className="font-medium text-slate-900">
+                                    Output counts
+                                  </p>
+                                  <p className="mt-2 text-slate-700">
+                                    Blockers: {round.outputCounts.blockers},
+                                    Warnings: {round.outputCounts.warnings},
+                                    Suggestions:{" "}
+                                    {round.outputCounts.suggestions}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div className="mt-4">
+                                <p className="font-medium text-slate-900">
+                                  Summary
+                                </p>
+                                <p className="mt-1 text-sm text-slate-700">
+                                  {round.summary}
+                                </p>
+                              </div>
+
+                              {round.appliedChanges.length > 0 ? (
+                                <div className="mt-4">
+                                  <p className="font-medium text-slate-900">
+                                    Applied changes
+                                  </p>
+                                  <ul className="mt-2 list-disc space-y-2 pl-5 text-sm text-slate-700">
+                                    {round.appliedChanges.map((item, index) => (
+                                      <li
+                                        key={`round-${round.round}-change-${index}`}
+                                      >
+                                        {item}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
+                          No autonomous refinement rounds were needed. The PRD
+                          already met the refinement threshold.
+                        </div>
+                      )}
+
+                      <div>
+                        <p className="mb-2 font-semibold text-slate-900">
+                          Final corrected PRD used for generation
+                        </p>
+                        <Textarea
+                          className="min-h-[260px] rounded-2xl"
+                          value={refinementSummary.finalCorrectedPrd}
+                          readOnly
+                        />
+                      </div>
+                    </CardContent>
+                  </Card>
+                ) : null}
+
+                {qualityReport ? (
+                  <Card className="rounded-3xl border-slate-200 shadow-sm">
+                    <CardHeader>
+                      <CardTitle className="text-lg">
+                        Requirement Quality Report
+                      </CardTitle>
+                      <CardDescription>
+                        AI-detected requirement quality issues based on the
+                        refined PRD used for generation.
+                      </CardDescription>
+                    </CardHeader>
+
+                    <CardContent className="space-y-5">
+                      <div className="flex flex-wrap gap-2">
+                        <Badge className="rounded-full border border-rose-200 bg-rose-50 text-rose-700">
+                          Blockers: {qualityReport.blockerCount}
+                        </Badge>
+                        <Badge className="rounded-full border border-amber-200 bg-amber-50 text-amber-700">
+                          Warnings: {qualityReport.warningCount}
+                        </Badge>
+                        <Badge className="rounded-full border border-sky-200 bg-sky-50 text-sky-700">
+                          Suggestions: {qualityReport.suggestionCount}
+                        </Badge>
+                      </div>
+
+                      <div className="rounded-2xl border bg-slate-50 p-4 text-sm text-slate-700">
+                        {qualityReport.summary}
+                      </div>
+
+                      {qualityReport.flags.length === 0 ? (
+                        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
+                          No major requirement quality issues were detected in
+                          this PRD.
+                        </div>
+                      ) : (
+                        <div className="space-y-4">
+                          {qualityReport.flags.map((flag, index) => (
+                            <div
+                              key={`quality-flag-${index}`}
+                              className="rounded-2xl border border-slate-200 bg-white p-4"
+                            >
+                              <div className="mb-3 flex flex-wrap items-center gap-2">
+                                <Badge
+                                  className={`rounded-full border ${qualitySeverityTone(
+                                    flag.severity
+                                  )}`}
+                                >
+                                  {flag.severity}
+                                </Badge>
+                                <Badge variant="outline" className="rounded-full">
+                                  {flag.category}
+                                </Badge>
+                                {flag.sectionHint ? (
+                                  <Badge
+                                    variant="secondary"
+                                    className="rounded-full"
+                                  >
+                                    {flag.sectionHint}
+                                  </Badge>
+                                ) : null}
+                              </div>
+
+                              <div className="space-y-3 text-sm">
+                                <div>
+                                  <p className="font-medium text-slate-900">
+                                    Quoted text
+                                  </p>
+                                  <p className="mt-1 rounded-xl border bg-slate-50 p-3 text-slate-700">
+                                    {flag.quotedText}
+                                  </p>
+                                </div>
+
+                                <div>
+                                  <p className="font-medium text-slate-900">
+                                    Why this matters
+                                  </p>
+                                  <p className="mt-1 text-slate-700">
+                                    {flag.reason}
+                                  </p>
+                                </div>
+
+                                <div>
+                                  <p className="font-medium text-slate-900">
+                                    Suggested fix
+                                  </p>
+                                  <p className="mt-1 text-slate-700">
+                                    {flag.suggestedFix}
+                                  </p>
+                                </div>
+
+                                {flag.requirementIds.length > 0 ? (
+                                  <div>
+                                    <p className="font-medium text-slate-900">
+                                      Related requirement IDs
+                                    </p>
+                                    <div className="mt-2 flex flex-wrap gap-2">
+                                      {flag.requirementIds.map((id) => (
+                                        <Badge
+                                          key={id}
+                                          variant="outline"
+                                          className="rounded-full"
+                                        >
+                                          {id}
+                                        </Badge>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ) : null}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                ) : null}
 
                 <AnimatePresence>
                   {showApproval && (
@@ -1359,9 +1878,8 @@ export default function AIAgileStoryForgeWebsite() {
                         Authenticated access
                       </p>
                       <p className="mt-2">
-                        The application uses Google sign-in and protects server
-                        APIs using authenticated route access and user-scoped
-                        runs.
+                        The application uses sign-in and protects server APIs
+                        using authenticated route access and user-scoped runs.
                       </p>
                     </div>
                     <div className="rounded-2xl border p-4">
@@ -1390,7 +1908,8 @@ export default function AIAgileStoryForgeWebsite() {
                     <div className="rounded-2xl border p-4">
                       <p className="font-semibold text-slate-900">Jira</p>
                       <p className="mt-2">
-                        Jira is intentionally on hold in this recovery build.
+                        Jira integration can be added next once the AI pipeline
+                        and quality analysis are stabilized.
                       </p>
                     </div>
                     <div className="rounded-2xl border p-4">
@@ -1398,9 +1917,8 @@ export default function AIAgileStoryForgeWebsite() {
                         AI upgrade path
                       </p>
                       <p className="mt-2">
-                        The generator now responds dynamically to the uploaded
-                        PRD structure, and can be upgraded to a fully AI-based
-                        pipeline later.
+                        The generator responds dynamically to PRD structure and
+                        now includes autonomous requirement-quality refinement.
                       </p>
                     </div>
                   </CardContent>
@@ -1417,8 +1935,9 @@ export default function AIAgileStoryForgeWebsite() {
                       blueprint
                     </CardTitle>
                     <CardDescription>
-                      Auth-enabled prototype with SQLite persistence and run
-                      sharing
+                      Auth-enabled prototype with SQLite persistence, run
+                      sharing, async AI generation jobs, and autonomous
+                      requirement refinement.
                     </CardDescription>
                   </CardHeader>
 
@@ -1431,13 +1950,13 @@ export default function AIAgileStoryForgeWebsite() {
                       },
                       {
                         icon: BrainCircuit,
-                        title: "Story Generation",
-                        body: "Runs and stories are stored in SQLite with role-based access.",
+                        title: "Autonomous Refinement",
+                        body: "AI quality analysis and iterative refinement happen automatically in the worker.",
                       },
                       {
                         icon: History,
-                        title: "Activity Timeline",
-                        body: "Run creation and uploads are persisted and viewable.",
+                        title: "Quality Timeline",
+                        body: "Corrections, quality-analysis results, and refinement rounds are persisted and visible.",
                       },
                       {
                         icon: Shield,
@@ -1475,4 +1994,4 @@ export default function AIAgileStoryForgeWebsite() {
     </div>
   );
 }
-  
+

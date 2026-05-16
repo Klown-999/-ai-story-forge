@@ -3,12 +3,19 @@ export type Story = {
   id: string;
   kind: "Epic" | "Story";
   title: string;
-  estimate: string;
+  estimate: "S" | "M" | "L" | "XL";
   owner: string;
   dependsOn: string[];
   labels: string[];
   acceptance: string[];
+
+  // New richer fields
+  storyFormat?: string;
+  storyPoints?: number;
+  edgeCases?: string[];
 };
+
+
 
 export type StoredRun = {
   id: string;
@@ -20,7 +27,6 @@ export type StoredRun = {
   generatedStories: Story[];
   majorDecision: string;
   exportedFormats: string[];
-  sourceType?: string | null;
-  sourceFileName?: string | null;
-  lastSavedAt?: string | null;
+  lastSavedAt?: string;
 };
+

@@ -1,8 +1,12 @@
 
-import type { Story } from "@/types";
-import { Badge } from "@/components/ui/badge";
+"use client";
 
-type Props = {
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import type { Story } from "@/types";
+
+type StoryCardProps = {
   story: Story;
   selectable?: boolean;
   selected?: boolean;
@@ -11,57 +15,105 @@ type Props = {
 
 export default function StoryCard({
   story,
-  selectable,
-  selected,
+  selectable = false,
+  selected = false,
   onToggleSelect,
-}: Props) {
+}: StoryCardProps) {
   return (
-    <div
-      className={`rounded-2xl border p-4 ${
-        selected ? "border-slate-900 bg-slate-50" : "bg-white"
+    <Card
+      className={`rounded-3xl border-slate-200 shadow-sm transition ${
+        selected ? "ring-2 ring-slate-900" : ""
       }`}
     >
-      <div className="flex flex-wrap items-center gap-2">
-        <Badge>{story.id}</Badge>
-        <Badge variant="outline">{story.kind}</Badge>
-        <Badge variant="outline">{story.estimate}</Badge>
-      </div>
+      <CardHeader className="space-y-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <CardTitle className="text-base font-semibold text-slate-900">
+              {story.title}
+            </CardTitle>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <Badge className="rounded-full">{story.kind}</Badge>
+              <Badge variant="outline" className="rounded-full">
+                Estimate: {story.estimate}
+              </Badge>
+              {typeof story.storyPoints === "number" ? (
+                <Badge variant="outline" className="rounded-full">
+                  Story points: {story.storyPoints}
+                </Badge>
+              ) : null}
+            </div>
+          </div>
 
-      <p className="mt-3 font-semibold text-slate-900">{story.title}</p>
-      <p className="mt-2 text-sm text-slate-600">Owner: {story.owner}</p>
-
-      {story.dependsOn.length > 0 ? (
-        <p className="mt-2 text-sm text-slate-600">
-          Depends on: {story.dependsOn.join(", ")}
-        </p>
-      ) : null}
-
-      {story.labels.length > 0 ? (
-        <p className="mt-2 text-sm text-slate-600">
-          Labels: {story.labels.join(", ")}
-        </p>
-      ) : null}
-
-      {story.acceptance.length > 0 ? (
-        <div className="mt-3">
-          <p className="text-sm font-medium text-slate-900">Acceptance</p>
-          <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-600">
-            {story.acceptance.map((item, idx) => (
-              <li key={`${story.id}-acc-${idx}`}>{item}</li>
-            ))}
-          </ul>
+          {selectable && onToggleSelect ? (
+            <Button
+              className="rounded-2xl"
+              onClick={() => onToggleSelect(story.id)}
+            >
+              {selected ? "Deselect" : "Select"}
+            </Button>
+          ) : null}
         </div>
-      ) : null}
 
-      {selectable && onToggleSelect ? (
-        <button
-          type="button"
-          className="mt-4 rounded-xl border px-3 py-2 text-sm"
-          onClick={() => onToggleSelect(story.id)}
-        >
-          {selected ? "Deselect" : "Select"}
-        </button>
-      ) : null}
-    </div>
+        <div className="flex flex-wrap gap-2">
+          <Badge variant="secondary" className="rounded-full">
+            Owner: {story.owner}
+          </Badge>
+
+          {story.labels.map((label: string) => (
+            <Badge key={label} variant="outline" className="rounded-full">
+              {label}
+            </Badge>
+          ))}
+        </div>
+      </CardHeader>
+
+      <CardContent className="space-y-5">
+        {story.storyFormat ? (
+          <div>
+            <p className="mb-2 font-semibold text-slate-900">Story format</p>
+            <div className="rounded-2xl border bg-slate-50 p-3 text-sm text-slate-700">
+              {story.storyFormat}
+            </div>
+          </div>
+        ) : null}
+
+        {story.acceptance?.length ? (
+          <div>
+            <p className="mb-2 font-semibold text-slate-900">
+              Acceptance criteria
+            </p>
+            <ul className="list-disc space-y-2 pl-5 text-sm text-slate-700">
+              {story.acceptance.map((item: string, index: number) => (
+                <li key={`${story.id}-acceptance-${index}`}>{item}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        {story.edgeCases?.length ? (
+          <div>
+            <p className="mb-2 font-semibold text-slate-900">Edge cases</p>
+            <ul className="list-disc space-y-2 pl-5 text-sm text-slate-700">
+              {story.edgeCases.map((item: string, index: number) => (
+                <li key={`${story.id}-edge-${index}`}>{item}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        {story.dependsOn?.length ? (
+          <div>
+            <p className="mb-2 font-semibold text-slate-900">Depends on</p>
+            <div className="flex flex-wrap gap-2">
+              {story.dependsOn.map((dep: string) => (
+                <Badge key={dep} variant="outline" className="rounded-full">
+                  {dep}
+                </Badge>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
   );
 }
