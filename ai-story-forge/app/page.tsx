@@ -40,14 +40,17 @@ import type { StoredRun, Story } from "@/types";
 import { DEFAULT_PRD_TEXT, WORD_LIMIT } from "@/lib/constants";
 import {
   downloadOutputFile,
+  exportRunToJira,
   generateStories,
   getRunActivity,
   getRunDetails,
   getRuns,
+  testJiraConnectionApi,
   uploadPrdFile,
   type CurrentUser,
   type RequirementQualityReport,
   type AutonomousRefinementSummary,
+  type RunJiraIssue,
 } from "@/lib/api";
 
 function getRunTitleFromPrd(prdText: string) {
@@ -119,7 +122,7 @@ export default function AIAgileStoryForgeWebsite() {
   const [processing, setProcessing] = useState(false);
   const [showApproval, setShowApproval] = useState(false);
   const [majorDecision, setMajorDecision] = useState("Pending");
-
+  const [runJiraIssues, setRunJiraIssues] = useState<RunJiraIssue[]>([]);
   const [stories, setStories] = useState<Story[]>([]);
   const [runs, setRuns] = useState<StoredRun[]>([]);
 
@@ -143,6 +146,33 @@ export default function AIAgileStoryForgeWebsite() {
   const [uploadToken, setUploadToken] = useState("");
   const [uploading, setUploading] = useState(false);
 
+  const [jiraTesting, setJiraTesting] = useState(false);
+  const [jiraExporting, setJiraExporting] = useState(false);
+  const [jiraConnectionInfo, setJiraConnectionInfo] = useState<{
+    user: {
+      accountId: string;
+      displayName: string;
+      emailAddress?: string;
+    };
+    project: {
+      id: string;
+      key: string;
+      name: string;
+    };
+  } | null>(null);
+  const [jiraConnectionError, setJiraConnectionError] = useState("");
+  const [jiraExportError, setJiraExportError] = useState("");
+  const [jiraExportResult, setJiraExportResult] = useState<{
+    runId: string;
+    createdCount: number;
+    createdIssues: Array<{
+      storyId: string;
+      storyTitle: string;
+      issueKey: string;
+      issueUrl: string;
+    }>;
+  } | null>(null);
+  const [jiraAllowReExport, setJiraAllowReExport] = useState(false);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [currentUserLoading, setCurrentUserLoading] = useState(true);
 
@@ -344,6 +374,7 @@ export default function AIAgileStoryForgeWebsite() {
         setMajorDecision("Pending");
         setQualityReport(null);
         setRefinementSummary(null);
+        setRunJiraIssues([]);
         return serverRuns;
       }
 
@@ -400,6 +431,8 @@ export default function AIAgileStoryForgeWebsite() {
       setGenerationError("");
       setQualityReport(result.qualityReport ?? null);
       setRefinementSummary(result.refinementSummary ?? null);
+      setRunJiraIssues(result.jiraIssues ?? []);
+      setJiraAllowReExport(false);
 
       if (options?.switchTab ?? true) {
         setTab("workspace");
@@ -439,6 +472,8 @@ export default function AIAgileStoryForgeWebsite() {
         setRunActivity([]);
         setQualityReport(null);
         setRefinementSummary(null);
+        setRunJiraIssues([]);
+        setJiraAllowReExport(false);
       }
     }
 
@@ -579,6 +614,63 @@ export default function AIAgileStoryForgeWebsite() {
     }
   };
 
+  const handleTestJiraConnection = async () => {
+    try {
+      setJiraTesting(true);
+      setJiraConnectionError("");
+      setJiraConnectionInfo(null);
+
+      const result = await testJiraConnectionApi();
+
+      setJiraConnectionInfo(result.result);
+    } catch (error) {
+      console.error("Failed to test Jira connection:", error);
+      setJiraConnectionError(
+        error instanceof Error ? error.message : "Failed to test Jira connection"
+      );
+    } finally {
+      setJiraTesting(false);
+    }
+  };
+
+  
+  const handleExportCurrentRunToJira = async () => {
+    if (!currentRunId) return;
+
+    try {
+      setJiraExporting(true);
+      setJiraExportError("");
+      setJiraExportResult(null);
+
+      const result = await exportRunToJira(
+        currentRunId,
+        false,
+        jiraAllowReExport
+      );
+
+      setJiraExportResult({
+        runId: result.runId,
+        createdCount: result.createdCount,
+        createdIssues: result.createdIssues,
+      });
+
+      // Refresh runs so Jira count updates in the UI
+      const refreshed = await refreshRuns(currentRunId);
+      const targetRun = refreshed.find((run) => run.id === currentRunId);
+
+      if (targetRun) {
+        await restoreRun(targetRun, { switchTab: false });
+      }
+    } catch (error) {
+      console.error("Failed to export run to Jira:", error);
+      setJiraExportError(
+        error instanceof Error ? error.message : "Failed to export run to Jira"
+      );
+    } finally {
+      setJiraExporting(false);
+    }
+  };
+
   const runGeneration = async () => {
     if (overLimit || !canWrite) return;
 
@@ -591,6 +683,7 @@ export default function AIAgileStoryForgeWebsite() {
       setQualityReport(null);
       setRefinementSummary(null);
       setTab("workspace");
+      setRunJiraIssues([]);
 
       const response = await generateStories({
         prdText: prd,
@@ -877,8 +970,14 @@ export default function AIAgileStoryForgeWebsite() {
                           {run.stories} stories
                         </Badge>
                       </div>
-
+                      
                       <div className="mt-2 flex flex-wrap gap-2">
+                        {run.jira > 0 ? (
+                          <Badge className="rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700">
+                            Exported to Jira
+                          </Badge>
+                        ) : null}
+
                         <Badge variant="outline" className="rounded-full">
                           Jira: {run.jira}
                         </Badge>
@@ -1003,6 +1102,13 @@ export default function AIAgileStoryForgeWebsite() {
                               <Badge variant="outline" className="rounded-full">
                                 {currentRun.date}
                               </Badge>
+
+                              {currentRun.jira > 0 ? (
+                                <Badge className="rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700">
+                                  Exported to Jira
+                                </Badge>
+                              ) : null}
+
                               <Badge variant="outline" className="rounded-full">
                                 Jira: {currentRun.jira}
                               </Badge>
@@ -1047,6 +1153,45 @@ export default function AIAgileStoryForgeWebsite() {
                         )}
                       </CardContent>
                     </Card>
+
+                    {runJiraIssues.length > 0 ? (
+                      <Card className="rounded-3xl border-slate-200 shadow-sm">
+                        <CardHeader>
+                          <CardTitle className="text-lg">Jira Issues for Current Run</CardTitle>
+                          <CardDescription>
+                            Issues that were created in Jira from this run.
+                          </CardDescription>
+                        </CardHeader>
+
+                        <CardContent className="space-y-3">
+                          {runJiraIssues.map((issue) => (
+                            <div
+                              key={`${issue.story_id}-${issue.issue_key}`}
+                              className="rounded-2xl border border-slate-200 bg-white p-4"
+                            >
+                              <div className="flex flex-wrap items-center gap-2">
+                                <Badge className="rounded-full">{issue.issue_key}</Badge>
+                                <a
+                                  href={issue.issue_url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-sm font-medium text-blue-700 underline"
+                                >
+                                  Open in Jira
+                                </a>
+                              </div>
+
+                              <p className="mt-2 text-sm text-slate-600">
+                                Story ID: {issue.story_id}
+                              </p>
+                              <p className="mt-1 text-xs text-slate-500">
+                                Created at: {issue.created_at}
+                              </p>
+                            </div>
+                          ))}
+                        </CardContent>
+                      </Card>
+                    ) : null}
 
                     {renderExportControls()}
 
@@ -1721,7 +1866,7 @@ export default function AIAgileStoryForgeWebsite() {
                           generated response.
                         </CardDescription>
                       </div>
-
+                      
                       <div className="flex flex-wrap gap-2">
                         <Badge className="rounded-full">
                           Decision: {majorDecision}
@@ -1729,6 +1874,12 @@ export default function AIAgileStoryForgeWebsite() {
                         <Badge variant="outline" className="rounded-full">
                           {stories.length} items
                         </Badge>
+
+                        {runJiraIssues.length > 0 ? (
+                          <Badge className="rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700">
+                            Exported to Jira
+                          </Badge>
+                        ) : null}
 
                         {currentRunId ? (
                           <Link href={`/runs/${currentRunId}`}>
@@ -1803,6 +1954,51 @@ export default function AIAgileStoryForgeWebsite() {
                   </CardContent>
                 </Card>
 
+                {runJiraIssues.length > 0 ? (
+                  <Card className="rounded-3xl border-slate-200 shadow-sm">
+                    <CardHeader>
+                      <CardTitle className="text-lg">Jira Export Results</CardTitle>
+                      <CardDescription>
+                        This run has already been exported to Jira.
+                      </CardDescription>
+                    </CardHeader>
+
+                    <CardContent className="space-y-3">
+                      <div className="flex flex-wrap gap-2">
+                        <Badge className="rounded-full">
+                          Jira issues: {runJiraIssues.length}
+                        </Badge>
+                      </div>
+
+                      {runJiraIssues.map((issue) => (
+                        <div
+                          key={`${issue.story_id}-${issue.issue_key}`}
+                          className="rounded-2xl border border-slate-200 bg-white p-4"
+                        >
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge className="rounded-full">{issue.issue_key}</Badge>
+                            <a
+                              href={issue.issue_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-sm font-medium text-blue-700 underline"
+                            >
+                              Open in Jira
+                            </a>
+                          </div>
+
+                          <p className="mt-2 text-sm text-slate-600">
+                            Story ID: {issue.story_id}
+                          </p>
+                          <p className="mt-1 text-xs text-slate-500">
+                            Created at: {issue.created_at}
+                          </p>
+                        </div>
+                      ))}
+                    </CardContent>
+                  </Card>
+                ) : null}
+
                 <Card className="rounded-3xl border-slate-200 shadow-sm">
                   <CardHeader>
                     <CardTitle className="flex items-center gap-2 text-lg">
@@ -1859,67 +2055,201 @@ export default function AIAgileStoryForgeWebsite() {
               </div>
             )}
 
+            
             {tab === "integrations" && (
-              <div className="grid gap-6 xl:grid-cols-2">
+              <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
                 <Card className="rounded-3xl border-slate-200 shadow-sm">
                   <CardHeader>
                     <CardTitle className="flex items-center gap-2 text-lg">
-                      <MonitorSmartphone className="h-5 w-5" /> Authenticated
-                      app mode
+                      <Link2 className="h-5 w-5" /> Jira Integration
                     </CardTitle>
                     <CardDescription>
-                      Google sign-in is enabled
+                      Test Jira connectivity and export the current generated run into Jira.
                     </CardDescription>
                   </CardHeader>
 
-                  <CardContent className="space-y-4 text-sm text-slate-700">
-                    <div className="rounded-2xl border p-4">
-                      <p className="font-semibold text-slate-900">
-                        Authenticated access
-                      </p>
-                      <p className="mt-2">
-                        The application uses sign-in and protects server APIs
-                        using authenticated route access and user-scoped runs.
-                      </p>
+                  <CardContent className="space-y-5">
+                    <div className="flex flex-wrap gap-3">
+                      <Button
+                        className="rounded-2xl"
+                        onClick={handleTestJiraConnection}
+                        disabled={jiraTesting}
+                      >
+                        {jiraTesting ? "Testing..." : "Test Jira Connection"}
+                      </Button>
+
+                      <Button
+                        className="rounded-2xl"
+                        onClick={handleExportCurrentRunToJira}
+                        disabled={
+                          jiraExporting ||
+                          !currentRunId ||
+                          (runJiraIssues.length > 0 && !jiraAllowReExport)
+                        }
+                      >
+                        {jiraExporting ? "Exporting..." : "Export Current Run to Jira"}
+                      </Button>
                     </div>
-                    <div className="rounded-2xl border p-4">
-                      <p className="font-semibold text-slate-900">
-                        Run sharing
-                      </p>
-                      <p className="mt-2">
-                        Editors and admins can share selected runs with viewer
-                        users for read-only access.
-                      </p>
-                    </div>
+
+                    {!currentRunId ? (
+                      <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+                        No active run is selected. Open a run first, then export it to Jira.
+                      </div>
+                    ) : (
+                      <div className="rounded-2xl border bg-slate-50 p-4 text-sm text-slate-700">
+                        <p className="font-medium text-slate-900">Current run</p>
+                        <p className="mt-1">
+                          {currentRun?.title || currentRunId}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-500">{currentRunId}</p>
+
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {runJiraIssues.length > 0 ? (
+                            <Badge className="rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700">
+                              Exported to Jira
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="rounded-full">
+                              Not exported yet
+                            </Badge>
+                          )}
+
+                          <Badge variant="outline" className="rounded-full">
+                            Jira issues: {runJiraIssues.length}
+                          </Badge>
+                        </div>
+                      </div>
+                    )}
+
+                    {runJiraIssues.length > 0 ? (
+                      <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                        <p className="font-semibold">This run was already exported to Jira.</p>
+                        <p className="mt-2">
+                          Existing Jira issues found: <strong>{runJiraIssues.length}</strong>
+                        </p>
+                        <label className="mt-3 flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={jiraAllowReExport}
+                            onChange={(e) => setJiraAllowReExport(e.target.checked)}
+                          />
+                          <span>Allow re-export (may create duplicate Jira issues)</span>
+                        </label>
+                      </div>
+                    ) : null}
+
+                    {jiraConnectionInfo ? (
+                      <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                        <p className="font-semibold text-emerald-900">
+                          Jira connection successful
+                        </p>
+                        <div className="mt-3 space-y-1 text-sm text-emerald-900">
+                          <p>
+                            <span className="font-medium">User:</span>{" "}
+                            {jiraConnectionInfo.user.displayName}
+                          </p>
+                          <p>
+                            <span className="font-medium">Email:</span>{" "}
+                            {jiraConnectionInfo.user.emailAddress || "N/A"}
+                          </p>
+                          <p>
+                            <span className="font-medium">Project:</span>{" "}
+                            {jiraConnectionInfo.project.name} (
+                            {jiraConnectionInfo.project.key})
+                          </p>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {jiraConnectionError ? (
+                      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
+                        {jiraConnectionError}
+                      </div>
+                    ) : null}
+
+                    {jiraExportResult ? (
+                      <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                        <p className="font-semibold text-emerald-900">
+                          Jira export completed
+                        </p>
+                        <p className="mt-2 text-sm text-emerald-900">
+                          Created <strong>{jiraExportResult.createdCount}</strong> issue(s)
+                          for run <strong>{jiraExportResult.runId}</strong>.
+                        </p>
+
+                        <div className="mt-4 space-y-3">
+                          {jiraExportResult.createdIssues.map((issue) => (
+                            <div
+                              key={`${issue.storyId}-${issue.issueKey}`}
+                              className="rounded-2xl border border-emerald-200 bg-white p-3"
+                            >
+                              <p className="font-medium text-slate-900">
+                                {issue.storyTitle}
+                              </p>
+                              <div className="mt-2 flex flex-wrap items-center gap-2">
+                                <Badge className="rounded-full">{issue.issueKey}</Badge>
+                                <a
+                                  href={issue.issueUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-sm text-blue-600 underline"
+                                >
+                                  Open in Jira
+                                </a>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {jiraExportError ? (
+                      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
+                        {jiraExportError}
+                      </div>
+                    ) : null}
                   </CardContent>
                 </Card>
 
                 <Card className="rounded-3xl border-slate-200 shadow-sm">
                   <CardHeader>
-                    <CardTitle className="flex items-center gap-2 text-lg">
-                      <Link2 className="h-5 w-5" /> External integrations
-                    </CardTitle>
+                    <CardTitle className="text-lg">Integration Notes</CardTitle>
                     <CardDescription>
-                      Reserved for future integrations
+                      Current Jira integration status and usage guidance.
                     </CardDescription>
                   </CardHeader>
 
                   <CardContent className="space-y-4 text-sm text-slate-700">
                     <div className="rounded-2xl border p-4">
-                      <p className="font-semibold text-slate-900">Jira</p>
+                      <p className="font-semibold text-slate-900">Current Phase</p>
                       <p className="mt-2">
-                        Jira integration can be added next once the AI pipeline
-                        and quality analysis are stabilized.
+                        Phase 1 and Phase 2 Jira integration are now enabled:
+                      </p>
+                      <ul className="mt-2 list-disc space-y-2 pl-5">
+                        <li>Jira connection test</li>
+                        <li>Run export to Jira</li>
+                        <li>Issue key + URL display in UI</li>
+                        <li>Run Jira count refresh after export</li>
+                      </ul>
+                    </div>
+
+                    <div className="rounded-2xl border p-4">
+                      <p className="font-semibold text-slate-900">Current Limitation</p>
+                      <p className="mt-2">
+                        This phase exports standard story/task items. Epic-specific Jira
+                        hierarchy handling can be added in a later phase if needed.
                       </p>
                     </div>
+
                     <div className="rounded-2xl border p-4">
-                      <p className="font-semibold text-slate-900">
-                        AI upgrade path
-                      </p>
-                      <p className="mt-2">
-                        The generator responds dynamically to PRD structure and
-                        now includes autonomous requirement-quality refinement.
-                      </p>
+                      <p className="font-semibold text-slate-900">Recommended Demo Flow</p>
+                      <ol className="mt-2 list-decimal space-y-2 pl-5">
+                        <li>Generate a run from a sample PRD</li>
+                        <li>Open this Integrations tab</li>
+                        <li>Click “Test Jira Connection”</li>
+                        <li>Click “Export Current Run to Jira”</li>
+                        <li>Open the created issue links</li>
+                      </ol>
                     </div>
                   </CardContent>
                 </Card>

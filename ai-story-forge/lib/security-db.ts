@@ -99,6 +99,17 @@ db.exec(`
 `);
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS run_jira_issues (
+    run_id TEXT NOT NULL,
+    story_id TEXT NOT NULL,
+    issue_key TEXT NOT NULL,
+    issue_url TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (run_id, story_id, issue_key)
+  );
+`);
+
+db.exec(`
   CREATE TABLE IF NOT EXISTS stories (
     story_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
@@ -165,6 +176,63 @@ export function getAppUserByEmail(email: string) {
   `);
 
   return stmt.get(email) as AppUserRow | undefined;
+}
+
+export function upsertRunJiraIssue(params: {
+  runId: string;
+  storyId: string;
+  issueKey: string;
+  issueUrl: string;
+}) {
+  const stmt = db.prepare(`
+    INSERT OR REPLACE INTO run_jira_issues (
+      run_id,
+      story_id,
+      issue_key,
+      issue_url,
+      created_at
+    ) VALUES (?, ?, ?, ?, datetime('now'))
+  `);
+
+  stmt.run(params.runId, params.storyId, params.issueKey, params.issueUrl);
+}
+
+export function getRunJiraIssues(runId: string) {
+  const stmt = db.prepare(`
+    SELECT
+      run_id,
+      story_id,
+      issue_key,
+      issue_url,
+      created_at
+    FROM run_jira_issues
+    WHERE run_id = ?
+    ORDER BY created_at ASC
+  `);
+
+  return stmt.all(runId) as Array<{
+    run_id: string;
+    story_id: string;
+    issue_key: string;
+    issue_url: string;
+    created_at: string;
+  }>;
+}
+
+export function recomputeRunJiraCount(runId: string) {
+  const stmt = db.prepare(`
+    UPDATE runs
+    SET
+      jira_count = (
+        SELECT COUNT(*)
+        FROM run_jira_issues
+        WHERE run_id = ?
+      ),
+      last_saved_at = datetime('now')
+    WHERE run_id = ?
+  `);
+
+  stmt.run(runId, runId);
 }
 
 export type RunGenerationJobStatus =

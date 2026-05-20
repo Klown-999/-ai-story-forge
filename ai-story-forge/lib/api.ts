@@ -9,6 +9,14 @@ export type CurrentUser = {
   provider?: string | null;
 };
 
+export type RunJiraIssue = {
+  run_id: string;
+  story_id: string;
+  issue_key: string;
+  issue_url: string;
+  created_at: string;
+};
+
 export type RunListItem = {
   id: string;
   title: string;
@@ -180,6 +188,7 @@ export async function getRunDetails(runId: string) {
     stories: Story[];
     qualityReport: RequirementQualityReport | null;
     refinementSummary: AutonomousRefinementSummary | null;
+    jiraIssues: RunJiraIssue[];
   }>;
 }
 
@@ -289,5 +298,70 @@ export async function applyQualityFixesAndRegenerate(runId: string) {
     appliedChanges: string[];
     skippedIssues: string[];
     summary: string;
+  }>;
+}
+
+export async function testJiraConnectionApi() {
+  const response = await fetch("/api/jira/test", {
+    method: "GET",
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Failed to test Jira connection (${response.status})`);
+  }
+
+  return response.json() as Promise<{
+    ok: true;
+    message: string;
+    result: {
+      user: {
+        accountId: string;
+        displayName: string;
+        emailAddress?: string;
+      };
+      project: {
+        id: string;
+        key: string;
+        name: string;
+      };
+    };
+  }>;
+}
+
+export async function exportRunToJira(
+  runId: string,
+  includeEpics = false,
+  allowReExport = false
+) {
+  const response = await fetch("/api/jira/export", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      runId,
+      includeEpics,
+      allowReExport,
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Failed to export run to Jira (${response.status})`);
+  }
+
+  return response.json() as Promise<{
+    ok: true;
+    runId: string;
+    createdCount: number;
+    createdIssues: Array<{
+      storyId: string;
+      storyTitle: string;
+      issueKey: string;
+      issueUrl: string;
+    }>;
+    reExported?: boolean;
   }>;
 }

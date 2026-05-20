@@ -6,6 +6,7 @@ import {
   getStoriesForRun,
   getRunQualityReport,
   getRunRefinementSummary,
+  getRunJiraIssues,
   userCanAccessRun,
 } from "@/lib/security-db";
 
@@ -40,6 +41,7 @@ export async function GET(
     const stories = getStoriesForRun(runId);
     const qualityReport = getRunQualityReport(runId);
     const refinementSummary = getRunRefinementSummary(runId);
+    const jiraIssues = getRunJiraIssues(runId);
 
     return NextResponse.json({
       ok: true,
@@ -58,6 +60,7 @@ export async function GET(
       stories,
       qualityReport,
       refinementSummary,
+      jiraIssues,
     });
   } catch (error) {
     console.error("GET /api/runs/[runId] failed:", error);
