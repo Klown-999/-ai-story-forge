@@ -17,6 +17,8 @@ import {
   ReactFlow,
   ReactFlowProvider,
   MarkerType,
+  Handle,
+  Position,
   type Edge,
   type Node,
   type NodeProps,
@@ -81,6 +83,18 @@ const StoryFlowNodeComponent = memo((props: NodeProps) => {
         opacity: typedProps.data.selected || !typedProps.data.related ? 1 : 0.88,
       }}
     >
+      <Handle
+        type="target"
+        position={Position.Left}
+        style={{ background: "#94a3b8", width: 8, height: 8 }}
+      />
+
+      <Handle
+        type="source"
+        position={Position.Right}
+        style={{ background: "#94a3b8", width: 8, height: 8 }}
+      />
+      
       <div
         style={{
           display: "flex",

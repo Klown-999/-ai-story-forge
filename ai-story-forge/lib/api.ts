@@ -121,6 +121,7 @@ export async function generateStories(payload: {
   sourceFileName?: string;
   sourceType?: string;
   uploadToken?: string;
+  allowDuplicatePrd?: boolean;
 }) {
   const response = await fetch("/api/stories/generate", {
     method: "POST",
@@ -333,7 +334,8 @@ export async function testJiraConnectionApi() {
 export async function exportRunToJira(
   runId: string,
   includeEpics = false,
-  allowReExport = false
+  allowReExport = false,
+  allowCrossRunDuplicateExport = false
 ) {
   const response = await fetch("/api/jira/export", {
     method: "POST",
@@ -344,6 +346,7 @@ export async function exportRunToJira(
       runId,
       includeEpics,
       allowReExport,
+      allowCrossRunDuplicateExport,
     }),
   });
 

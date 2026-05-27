@@ -110,6 +110,23 @@ db.exec(`
 `);
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS runs (
+    run_id TEXT PRIMARY KEY,
+    owner_user_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    date TEXT NOT NULL,
+    prd TEXT NOT NULL,
+    prd_fingerprint TEXT,
+    major_decision TEXT,
+    story_count INTEGER NOT NULL DEFAULT 0,
+    jira_count INTEGER NOT NULL DEFAULT 0,
+    source_type TEXT,
+    source_file_name TEXT,
+    last_saved_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+`);
+
+db.exec(`
   CREATE TABLE IF NOT EXISTS stories (
     story_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
@@ -153,6 +170,16 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(run_id, viewer_user_id)
   );
+`);
+
+
+try {
+  db.exec(`ALTER TABLE runs ADD COLUMN prd_fingerprint TEXT;`);
+} catch {}
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_runs_prd_fingerprint
+  ON runs (prd_fingerprint);
 `);
 
 try {
@@ -473,11 +500,15 @@ export function createRun(params: {
   title: string;
   date: string;
   prd: string;
-  majorDecision?: string;
+  prdFingerprint: string;
+  majorDecision?: string | null;
+  storyCount?: number;
+  jiraCount?: number;
   sourceType?: string | null;
   sourceFileName?: string | null;
 }) {
   const runId = randomUUID();
+
   const stmt = db.prepare(`
     INSERT INTO runs (
       run_id,
@@ -485,14 +516,15 @@ export function createRun(params: {
       title,
       date,
       prd,
+      prd_fingerprint,
       major_decision,
-      source_type,
-      source_file_name,
       story_count,
       jira_count,
-      status,
+      source_type,
+      source_file_name,
       last_saved_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'ready', datetime('now'))
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
   `);
 
   stmt.run(
@@ -501,7 +533,10 @@ export function createRun(params: {
     params.title,
     params.date,
     params.prd,
-    params.majorDecision ?? "Pending",
+    params.prdFingerprint,
+    params.majorDecision ?? null,
+    params.storyCount ?? 0,
+    params.jiraCount ?? 0,
     params.sourceType ?? null,
     params.sourceFileName ?? null
   );
@@ -929,4 +964,102 @@ export function updateRunGeneratedMetadata(params: {
   `);
 
   stmt.run(params.prd, params.majorDecision, params.runId);
+}
+
+export function findRunsByPrdFingerprint(
+  ownerUserId: string,
+  prdFingerprint: string
+) {
+  const stmt = db.prepare(`
+    SELECT
+      run_id,
+      owner_user_id,
+      title,
+      date,
+      prd,
+      prd_fingerprint,
+      major_decision,
+      story_count,
+      jira_count,
+      source_type,
+      source_file_name,
+      last_saved_at
+    FROM runs
+    WHERE owner_user_id = ?
+      AND prd_fingerprint = ?
+    ORDER BY last_saved_at DESC
+  `);
+
+  return stmt.all(ownerUserId, prdFingerprint) as Array<{
+    run_id: string;
+    owner_user_id: string;
+    title: string;
+    date: string;
+    prd: string;
+    prd_fingerprint: string | null;
+    major_decision: string | null;
+    story_count: number;
+    jira_count: number;
+    source_type: string | null;
+    source_file_name: string | null;
+    last_saved_at: string;
+  }>;
+}
+
+export function findJiraExportedRunsByPrdFingerprint(
+  ownerUserId: string,
+  prdFingerprint: string,
+  excludeRunId?: string
+) {
+  const stmt = db.prepare(`
+    SELECT
+      run_id,
+      owner_user_id,
+      title,
+      date,
+      prd,
+      prd_fingerprint,
+      major_decision,
+      story_count,
+      jira_count,
+      source_type,
+      source_file_name,
+      last_saved_at
+    FROM runs
+    WHERE owner_user_id = ?
+      AND prd_fingerprint = ?
+      AND jira_count > 0
+      ${excludeRunId ? "AND run_id != ?" : ""}
+    ORDER BY last_saved_at DESC
+  `);
+
+  return excludeRunId
+    ? (stmt.all(ownerUserId, prdFingerprint, excludeRunId) as Array<{
+        run_id: string;
+        owner_user_id: string;
+        title: string;
+        date: string;
+        prd: string;
+        prd_fingerprint: string | null;
+        major_decision: string | null;
+        story_count: number;
+        jira_count: number;
+        source_type: string | null;
+        source_file_name: string | null;
+        last_saved_at: string;
+      }>)
+    : (stmt.all(ownerUserId, prdFingerprint) as Array<{
+        run_id: string;
+        owner_user_id: string;
+        title: string;
+        date: string;
+        prd: string;
+        prd_fingerprint: string | null;
+        major_decision: string | null;
+        story_count: number;
+        jira_count: number;
+        source_type: string | null;
+        source_file_name: string | null;
+        last_saved_at: string;
+      }>);
 }

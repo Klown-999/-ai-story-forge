@@ -10,6 +10,7 @@ import {
   recomputeRunJiraCount,
   upsertRunJiraIssue,
   userCanAccessRun,
+  findJiraExportedRunsByPrdFingerprint,
 } from "@/lib/security-db";
 import type { Story } from "@/types";
 
@@ -20,6 +21,7 @@ type ExportJiraBody = {
   runId?: string;
   includeEpics?: boolean;
   allowReExport?: boolean;
+  allowCrossRunDuplicateExport?: boolean;
 };
 
 export async function POST(request: Request) {
@@ -71,6 +73,40 @@ export async function POST(request: Request) {
         },
         { status: 409 }
       );
+    }
+
+    const currentFingerprint = run.prd_fingerprint || null;
+
+    if (currentFingerprint) {
+      const duplicateExportedRuns = findJiraExportedRunsByPrdFingerprint(
+        authResult.user.id,
+        currentFingerprint,
+        runId
+      );
+
+      if (
+        duplicateExportedRuns.length > 0 &&
+        !body.allowCrossRunDuplicateExport
+      ) {
+        const latest = duplicateExportedRuns[0];
+
+        return NextResponse.json(
+          {
+            message:
+              "A different run based on the same PRD was already exported to Jira. Cross-run duplicate export is blocked unless allowCrossRunDuplicateExport is set to true.",
+            duplicateAcrossRuns: true,
+            existingExportedRun: {
+              id: latest.run_id,
+              title: latest.title,
+              date: latest.date,
+              jira: latest.jira_count,
+              stories: latest.story_count,
+              lastSavedAt: latest.last_saved_at,
+            },
+          },
+          { status: 409 }
+        );
+      }
     }
 
     const allStories = getStoriesForRun(runId);

@@ -141,6 +141,20 @@ export default function AIAgileStoryForgeWebsite() {
 
   const [prd, setPrd] = useState(DEFAULT_PRD_TEXT);
 
+  const [duplicatePrdWarning, setDuplicatePrdWarning] = useState<{
+    existingRun: {
+      id: string;
+      title: string;
+      date: string;
+      jira: number;
+      stories: number;
+      lastSavedAt?: string | null;
+    };
+  } | null>(null);
+
+  const [allowDuplicatePrdGeneration, setAllowDuplicatePrdGeneration] =
+    useState(false);
+
   const [uploadedSourceFileName, setUploadedSourceFileName] = useState("");
   const [uploadedSourceType, setUploadedSourceType] = useState("");
   const [uploadToken, setUploadToken] = useState("");
@@ -433,6 +447,10 @@ export default function AIAgileStoryForgeWebsite() {
       setRefinementSummary(result.refinementSummary ?? null);
       setRunJiraIssues(result.jiraIssues ?? []);
       setJiraAllowReExport(false);
+      setDuplicatePrdWarning(null);
+      setAllowDuplicatePrdGeneration(false);
+      setJiraCrossRunDuplicateWarning(null);
+      setJiraAllowCrossRunDuplicateExport(false);
 
       if (options?.switchTab ?? true) {
         setTab("workspace");
@@ -474,6 +492,10 @@ export default function AIAgileStoryForgeWebsite() {
         setRefinementSummary(null);
         setRunJiraIssues([]);
         setJiraAllowReExport(false);
+        setDuplicatePrdWarning(null);
+        setAllowDuplicatePrdGeneration(false);
+        setJiraCrossRunDuplicateWarning(null);
+        setJiraAllowCrossRunDuplicateExport(false);
       }
     }
 
@@ -543,6 +565,8 @@ export default function AIAgileStoryForgeWebsite() {
           }
 
           setProcessing(false);
+          setJiraCrossRunDuplicateWarning(null);
+          setJiraAllowCrossRunDuplicateExport(false);
           return;
         }
 
@@ -645,7 +669,8 @@ export default function AIAgileStoryForgeWebsite() {
       const result = await exportRunToJira(
         currentRunId,
         false,
-        jiraAllowReExport
+        jiraAllowReExport,
+        jiraAllowCrossRunDuplicateExport
       );
 
       setJiraExportResult({
@@ -663,13 +688,41 @@ export default function AIAgileStoryForgeWebsite() {
       }
     } catch (error) {
       console.error("Failed to export run to Jira:", error);
-      setJiraExportError(
-        error instanceof Error ? error.message : "Failed to export run to Jira"
-      );
+
+      const message =
+        error instanceof Error ? error.message : "Failed to export run to Jira";
+
+      try {
+        const parsed = JSON.parse(message);
+
+        if (parsed?.duplicateAcrossRuns && parsed?.existingExportedRun) {
+          setJiraCrossRunDuplicateWarning({
+            existingExportedRun: parsed.existingExportedRun,
+          });
+          return;
+        }
+      } catch {}
+
+      setJiraExportError(message);
     } finally {
       setJiraExporting(false);
     }
   };
+
+  const [jiraCrossRunDuplicateWarning, setJiraCrossRunDuplicateWarning] =
+    useState<{
+      existingExportedRun: {
+        id: string;
+        title: string;
+        date: string;
+        jira: number;
+        stories: number;
+        lastSavedAt?: string | null;
+      };
+    } | null>(null);
+
+  const [jiraAllowCrossRunDuplicateExport, setJiraAllowCrossRunDuplicateExport] =
+    useState(false);
 
   const runGeneration = async () => {
     if (overLimit || !canWrite) return;
@@ -691,6 +744,7 @@ export default function AIAgileStoryForgeWebsite() {
         sourceFileName: uploadedSourceFileName || undefined,
         sourceType: uploadedSourceType || undefined,
         uploadToken: uploadToken || undefined,
+        allowDuplicatePrd: allowDuplicatePrdGeneration,
       });
 
       setCurrentRunId(response.runId);
@@ -727,12 +781,28 @@ export default function AIAgileStoryForgeWebsite() {
       setUploadedSourceType("");
 
       await pollRunStatus(response.runId);
+    
     } catch (error) {
       console.error("Failed to queue or process generation:", error);
+
+      const message =
+        error instanceof Error ? error.message : "Failed to generate stories";
+
+      try {
+        const parsed = JSON.parse(message);
+
+        if (parsed?.duplicatePrd && parsed?.existingRun) {
+          setDuplicatePrdWarning({
+            existingRun: parsed.existingRun,
+          });
+          setProcessing(false);
+          setGenerationStatus("idle");
+          return;
+        }
+      } catch {}
+
       setGenerationStatus("failed");
-      setGenerationError(
-        error instanceof Error ? error.message : "Failed to generate stories"
-      );
+      setGenerationError(message);
       setProcessing(false);
     }
   };
@@ -1458,6 +1528,69 @@ export default function AIAgileStoryForgeWebsite() {
                     </div>
                   </CardContent>
                 </Card>
+                
+                {duplicatePrdWarning ? (
+                  <Card className="rounded-3xl border-amber-200 bg-amber-50/80 shadow-sm">
+                    <CardHeader>
+                      <CardTitle className="text-lg text-amber-900">
+                        Duplicate PRD detected
+                      </CardTitle>
+                      <CardDescription className="text-amber-800">
+                        A matching PRD has already been processed before.
+                      </CardDescription>
+                    </CardHeader>
+
+                    <CardContent className="space-y-4">
+                      <div className="rounded-2xl border border-amber-200 bg-white p-4 text-sm text-slate-700">
+                        <p className="font-medium text-slate-900">
+                          Existing run: {duplicatePrdWarning.existingRun.title}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-500">
+                          {duplicatePrdWarning.existingRun.id}
+                        </p>
+                        <p className="mt-2">
+                          Stories: {duplicatePrdWarning.existingRun.stories} · Jira:{" "}
+                          {duplicatePrdWarning.existingRun.jira}
+                        </p>
+                      </div>
+
+                      <div className="flex flex-wrap gap-3">
+                        <Button
+                          className="rounded-2xl border border-slate-300 bg-white text-slate-900 hover:bg-slate-50"
+                          onClick={async () => {
+                            const target = runs.find(
+                              (run) => run.id === duplicatePrdWarning.existingRun.id
+                            );
+
+                            if (target) {
+                              await restoreRun(target);
+                            } else {
+                              await refreshRuns(duplicatePrdWarning.existingRun.id);
+                            }
+
+                            setDuplicatePrdWarning(null);
+                            setAllowDuplicatePrdGeneration(false);
+                            setJiraCrossRunDuplicateWarning(null);
+                            setJiraAllowCrossRunDuplicateExport(false);
+                          }}
+                        >
+                          Open existing run
+                        </Button>
+
+                        <Button
+                          className="rounded-2xl"
+                          onClick={() => {
+                            setAllowDuplicatePrdGeneration(true);
+                            setDuplicatePrdWarning(null);
+                            void runGeneration();
+                          }}
+                        >
+                          Generate new run anyway
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ) : null}
 
                 {generationStatus !== "idle" ? (
                   <Card
@@ -2120,6 +2253,79 @@ export default function AIAgileStoryForgeWebsite() {
                         </div>
                       </div>
                     )}
+
+                    {jiraCrossRunDuplicateWarning ? (
+                      <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                        <p className="font-semibold">
+                          A different run based on the same PRD was already exported to Jira.
+                        </p>
+
+                        <div className="mt-3 rounded-2xl border border-amber-200 bg-white p-3 text-slate-700">
+                          <p className="font-medium text-slate-900">
+                            Existing exported run:{" "}
+                            {jiraCrossRunDuplicateWarning.existingExportedRun.title}
+                          </p>
+                          <p className="mt-1 text-xs text-slate-500">
+                            {jiraCrossRunDuplicateWarning.existingExportedRun.id}
+                          </p>
+                          <p className="mt-2">
+                            Stories: {jiraCrossRunDuplicateWarning.existingExportedRun.stories} · Jira:{" "}
+                            {jiraCrossRunDuplicateWarning.existingExportedRun.jira}
+                          </p>
+                        </div>
+
+                        <label className="mt-3 flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={jiraAllowCrossRunDuplicateExport}
+                            onChange={(e) =>
+                              setJiraAllowCrossRunDuplicateExport(e.target.checked)
+                            }
+                          />
+                          <span>
+                            Allow cross-run export anyway (may create duplicate Jira issues)
+                          </span>
+                        </label>
+
+                        <div className="mt-4 flex flex-wrap gap-3">
+                          <Button
+                            className="rounded-2xl border border-slate-300 bg-white text-slate-900 hover:bg-slate-50"
+                            onClick={async () => {
+                              const target = runs.find(
+                                (run) =>
+                                  run.id === jiraCrossRunDuplicateWarning.existingExportedRun.id
+                              );
+
+                              if (target) {
+                                await restoreRun(target);
+                              } else {
+                                await refreshRuns(
+                                  jiraCrossRunDuplicateWarning.existingExportedRun.id
+                                );
+                              }
+
+                              setJiraCrossRunDuplicateWarning(null);
+                              setJiraAllowCrossRunDuplicateExport(false);
+                              setJiraCrossRunDuplicateWarning(null);
+                              setJiraAllowCrossRunDuplicateExport(false);
+                            }}
+                          >
+                            Open exported run
+                          </Button>
+
+                          <Button
+                            className="rounded-2xl"
+                            disabled={!jiraAllowCrossRunDuplicateExport}
+                            onClick={() => {
+                              setJiraCrossRunDuplicateWarning(null);
+                              void handleExportCurrentRunToJira();
+                            }}
+                          >
+                            Export anyway
+                          </Button>
+                        </div>
+                      </div>
+                    ) : null}
 
                     {runJiraIssues.length > 0 ? (
                       <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">

@@ -6,12 +6,14 @@ import {
   createRun,
   getGenerationJobByRunId,
 } from "@/lib/security-db";
+import db from "@/lib/sqlite";
 
 export function enqueueGenerationJob(params: {
   ownerUserId: string;
   title: string;
   date: string;
   prdText: string;
+  prdFingerprint: string;
   sourceType?: string | null;
   sourceFileName?: string | null;
   userApprovedMajorChanges?: boolean | null;
@@ -21,32 +23,53 @@ export function enqueueGenerationJob(params: {
     title: params.title,
     date: params.date,
     prd: params.prdText,
-    majorDecision: "Pending",
+    prdFingerprint: params.prdFingerprint,
+    majorDecision:
+      params.userApprovedMajorChanges == null
+        ? "Pending"
+        : params.userApprovedMajorChanges
+        ? "Approved"
+        : "Rejected",
+    storyCount: 0,
+    jiraCount: 0,
     sourceType: params.sourceType ?? null,
     sourceFileName: params.sourceFileName ?? null,
   });
 
   const jobId = randomUUID();
 
-  createGenerationJob({
+  const stmt = db.prepare(`
+    INSERT INTO run_generation_jobs (
+      job_id,
+      run_id,
+      owner_user_id,
+      status,
+      prd_text,
+      user_approved_major_changes,
+      created_at,
+      updated_at
+    )
+    VALUES (?, ?, ?, 'queued', ?, ?, datetime('now'), datetime('now'))
+  `);
+
+  stmt.run(
     jobId,
     runId,
-    ownerUserId: params.ownerUserId,
-    prdText: params.prdText,
-    userApprovedMajorChanges: params.userApprovedMajorChanges ?? null,
-    sourceType: params.sourceType ?? null,
-    sourceFileName: params.sourceFileName ?? null,
-  });
+    params.ownerUserId,
+    params.prdText,
+    params.userApprovedMajorChanges == null
+      ? null
+      : params.userApprovedMajorChanges
+      ? 1
+      : 0
+  );
 
-  addRunActivity({
+  return {
+    jobId,
     runId,
-    type: "run_created",
-    title: "Generation queued",
-    description: "The AI generation job has been queued.",
-  });
-
-  return { runId, jobId };
+  };
 }
+
 
 export function getRunGenerationStatus(runId: string) {
   const job = getGenerationJobByRunId(runId);
